@@ -18,6 +18,7 @@
 #include <assert.h>
 #include <atomic>
 #include <any>
+#include <optional>
 
 namespace dxfsm {
 
