@@ -584,42 +584,15 @@ public:
                 return std::noop_coroutine();
             }
 
-            // Find the destination for {fromState, onEvent}-pair.
-            TransitionTarget to;
-            if (auto it = self->_mapTransitionTable.find({fromState, onEvent.name()}); it != self->_mapTransitionTable.end())
-                to = it->second;
-            else
+            std::optional<StateHandle> next_state = self->DoPotentialTransition(onEvent);
+
+            if (!next_state.has_value()) {
                 throw std::runtime_error("FSM '" + self->name() + "' can't find transition from state '" +
                                          std::string(fromState.promise().name) +
                                          "' on event '" + std::string(onEvent.name()) + "'.\nPlease fix the transition table.");
-            // Typically the event is being sent to a state owned by this FSM (i.e. self).
-            // However, it may also be going to a state owned by another FSM.
-            // The destination FSM is in TransitionTarget struct together with the state handle.
-            if (to.fsm == self) {  // The target state lives in this FSM.
-                self->_state = to.state;
-
-                if (self->logger)
-                    self->logger(self->name(), fromState.promise().name, onEvent, to.state.promise().name);
-
-                self->_bIsActive.store(true, std::memory_order_relaxed);
-                return to.state;
-            } else { // The target state lives in another FSM.
-                // Note: self FSM will suspend and self->state remains in the state where
-                //       it left off when to.fsm took over.
-                to.fsm->_state = to.state; // to.fsm will resume.
-                // Move the event to the target FSM. The event of the target FSM should be empty.
-                assert(to.fsm->_event.isEmpty());
-                to.fsm->_event = std::move(self->_event);
-
-                if (self->logger)
-                    self->logger(self->name()+"-->"+to.fsm->name(), fromState.promise().name, to.fsm->_event, to.state.promise().name);
-
-                // Self is suspended and to.fsm is resumed.
-                self->_bIsActive.store(false, std::memory_order_relaxed);
-                to.fsm->_bIsActive.store(true, std::memory_order_relaxed);
-
-                return to.state;
             }
+
+            return *next_state;
         }
 
         Event await_resume()
@@ -712,7 +685,13 @@ public:
                                      _state.promise().name+" because it has not been started. Call first fsm.start() to activate all states.");
 
         _event = std::move(*pEvent);
+
+        // Treat this event as one that could change the state
+        DoPotentialTransition(_event);
+        // _state will have updated in the above function call if it was a transition
+        // else, this event will be sent to the previous state
         _state.resume();
+
         return *this;
     }
 
@@ -762,14 +741,54 @@ private:
     StateHandle _state = nullptr; // Current state (for information only)
 
     // Find the handle based on the name. Returns nullptr if not found.
-     StateHandle findHandle(SV name) const
-     {
-        // Find the name from the list of states
-        for (const State& state : _vecStates)
-            if (state.getName() == name)
-                return state.handle();
-         return nullptr;
-     }
+    StateHandle findHandle(SV name) const
+    {
+    // Find the name from the list of states
+    for (const State& state : _vecStates)
+        if (state.getName() == name)
+            return state.handle();
+        return nullptr;
+    }
+
+    std::optional<StateHandle> DoPotentialTransition(const Event& onEvent) {
+        TransitionTarget to;
+
+        if (auto it = _mapTransitionTable.find({_state, onEvent.name()}); it != _mapTransitionTable.end())
+            to = it->second;
+        else
+            // No coded state transition, return empty handle to signify this
+            return std::nullopt;
+
+        auto fromState = _state;
+        // Typically the event is being sent to a state owned by this FSM (i.e. self).
+        // However, it may also be going to a state owned by another FSM.
+        // The destination FSM is in TransitionTarget struct together with the state handle.
+        if (to.fsm == this) {  // The target state lives in this FSM.
+            _state = to.state;
+
+            if (logger)
+                logger(name(), fromState.promise().name, onEvent, to.state.promise().name);
+
+            _bIsActive.store(true, std::memory_order_relaxed);
+            return to.state;
+        } else { // The target state lives in another FSM.
+            // Note: self FSM will suspend and self->state remains in the state where
+            //       it left off when to.fsm took over.
+            to.fsm->_state = to.state; // to.fsm will resume.
+            // Move the event to the target FSM. The event of the target FSM should be empty.
+            assert(to.fsm->_event.isEmpty());
+            to.fsm->_event = std::move(_event);
+
+            if (logger)
+                logger(name()+"-->"+to.fsm->name(), fromState.promise().name, to.fsm->_event, to.state.promise().name);
+
+            // Self is suspended and to.fsm is resumed.
+            _bIsActive.store(false, std::memory_order_relaxed);
+            to.fsm->_bIsActive.store(true, std::memory_order_relaxed);
+
+            return to.state;
+        }
+    }
 
     // Hashes a coroutine handle
     struct HandleHash
