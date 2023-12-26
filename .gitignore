@@ -13,3 +13,8 @@ Makefile
 CMakeCache.txt
 cmake_*.cmake
 _debs
+out/
+
+# VSCode
+
+*.code-workspace

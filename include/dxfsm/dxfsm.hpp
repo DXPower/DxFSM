@@ -1,5 +1,5 @@
-#ifndef COFSM_H
-#define COFSM_H
+#ifndef DXFSM_HPP
+#define DXFSM_HPP
 
 #include <coroutine>
 #include <memory>
@@ -19,7 +19,7 @@
 #include <atomic>
 #include <any>
 
-namespace CoFSM {
+namespace dxfsm {
 
 // Find out the cache line length.
 #ifdef __cpp_lib_hardware_interference_size
@@ -239,10 +239,10 @@ private:
             if (_anyPtr && _anyPtr->has_value())
                 return std::any_cast<AnyPtr<T>&>(*_anyPtr).ptr;
             else
-                throw std::runtime_error("CoFSM::Event does not contain data so data pointer can not be returned.");
+                throw std::runtime_error("dxfsm::Event does not contain data so data pointer can not be returned.");
         }
         catch (const std::bad_any_cast&) {
-            throw std::runtime_error("Attempt to store pointer to the object in CoFSM::Event into a variable of wrong type.");
+            throw std::runtime_error("Attempt to store pointer to the object in dxfsm::Event into a variable of wrong type.");
         }
         return nullptr;
     }
@@ -350,7 +350,7 @@ struct State
     }
 
     // False if the state is still waiting in initial_suspend.
-    // True if the initial await has been resumed /typically by calling CoFSM::start())
+    // True if the initial await has been resumed /typically by calling dxfsm::start())
     bool isStarted() const
     {
         return coro_handle_.promise().bIsStarted;
@@ -826,5 +826,5 @@ private:
     std::atomic<bool> _bIsActive = false;
 }; // FSM
 
-} // namespace CoFSM
-#endif // COFSM_H
+} // namespace dxfsm
+#endif // DXFSM_HPP
