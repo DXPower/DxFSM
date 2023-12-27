@@ -14,7 +14,8 @@ CMakeCache.txt
 cmake_*.cmake
 _debs
 out/
+compile_commands.json
 
 # VSCode
-
+.cache/
 *.code-workspace

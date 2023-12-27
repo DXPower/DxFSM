@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <ranges>
+#include <iostream>
 #include <catch2/catch_test_macros.hpp>
 
 using namespace dxfsm;
@@ -13,9 +14,9 @@ struct CollatzFsm {
     std::vector<std::string> event_names{};
 
     CollatzFsm() {
-        fsm << (StateStart(fsm) = "StateStart")
-            << (StateProcess(fsm) = "StateProcess")
-            << (StateFinish(fsm) = "StateFinish");
+        fsm << StateStart(fsm).Name("StateStart")
+            << StateProcess(fsm).Name("StateProcess")
+            << StateFinish(fsm).Name("StateFinish");
 
         fsm << transition("StateStart", "ProcessValue", "StateProcess")
             << transition("StateProcess", "ProcessValue", "StateProcess")
@@ -26,19 +27,20 @@ struct CollatzFsm {
     }
 
     State StateStart(FSM& fsm) {
+        std::cout << "Hello" << std::endl;
+
         Event event = co_await fsm.getEvent();
 
         while (true) {
             sequence.clear();
             event_names.clear();
 
-            event_names.push_back(event.nameAsString());
+            event_names.push_back(std::string(event.name()));
             
-            int* start_value{};
-            event >> start_value;
+            auto start_value = event.Get<int>();
 
-            event.construct("ProcessValue", *start_value);
-            event = co_await fsm.emitAndReceive(&event);
+            event.Store("ProcessValue", start_value);
+            co_await fsm.emitAndReceive2(event);
         }
     }
 
@@ -46,22 +48,21 @@ struct CollatzFsm {
         Event event = co_await fsm.getEvent();
 
         while (true) {
-            event_names.push_back(event.nameAsString());
+            event_names.push_back(std::string(event.name()));
 
-            int* cur_value{};
-            event >> cur_value;
+            auto& cur_value = event.Get<int>();
 
-            sequence.push_back(*cur_value);
+            sequence.push_back(cur_value);
 
-            if (*cur_value == 1) {
+            if (cur_value == 1) {
                 // Replace the current event with a Finish event
-                event.construct("Finish");
+                event.Store("Finish");
             } else {
                 // Change the value in the current event in-place
-                if (*cur_value % 2 == 0) {
-                    *cur_value /= 2;
+                if (cur_value % 2 == 0) {
+                    cur_value /= 2;
                 } else {
-                    *cur_value = 3 * *cur_value + 1;
+                    cur_value = 3 * cur_value + 1;
                 }
             }
 
@@ -73,10 +74,9 @@ struct CollatzFsm {
         Event event = co_await fsm.getEvent();
 
         while (true) {
-            event_names.push_back(event.nameAsString());
+            event_names.push_back(std::string(event.name()));
 
-            event.destroy();
-            event = co_await fsm.emitAndReceive(&event);
+            event = co_await fsm.getEvent();
         }
     }
 };
@@ -85,7 +85,7 @@ TEST_CASE( "Collatz FSM", "[basic][events][names]" ) {
     CollatzFsm collatz{};
 
     Event event;
-    event.construct("Start", 15);
+    event.Store("Start", 15);
     collatz.fsm.sendEvent(&event);
 
     auto odds = collatz.sequence | std::views::filter([](int x) { return x % 2 != 0; });

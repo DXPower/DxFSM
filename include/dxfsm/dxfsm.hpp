@@ -19,15 +19,65 @@
 #include <atomic>
 #include <any>
 #include <optional>
+#include <format>
 
 namespace dxfsm {
+namespace detail {
+    class AnyPtr {
+        std::any m_underlying_any{};
 
-// Find out the cache line length.
-#ifdef __cpp_lib_hardware_interference_size
-using std::hardware_constructive_interference_size;
-#else  // Make a reasonable guess.
-constexpr std::size_t hardware_constructive_interference_size = 64;
-#endif
+        template<typename T>
+        struct DestroyingPtr {
+            T* ptr{};
+
+            DestroyingPtr(T* ptr) noexcept : ptr(ptr) { }
+
+            ~DestroyingPtr() requires std::is_trivially_destructible_v<T> = default;
+            
+            ~DestroyingPtr() noexcept(noexcept(ptr->~T()))
+            requires (not std::is_trivially_destructible_v<T>) 
+            { ptr->~T(); }
+        };
+    public:
+        AnyPtr() = default;
+        AnyPtr(std::nullptr_t) { }
+
+        template<typename T>
+        AnyPtr(T* ptr) : m_underlying_any(DestroyingPtr(ptr)) { }
+
+        // Moves
+        AnyPtr(AnyPtr&& move) noexcept = default;
+        AnyPtr& operator=(AnyPtr&& move) noexcept = default;
+
+        template<typename T>
+        T* TryExtract() {
+            auto* any_ptr = std::any_cast<DestroyingPtr<T>>(&m_underlying_any);
+            return any_ptr ? any_ptr->ptr : nullptr;
+        }
+
+        template<typename T>
+        const T* TryExtract() const {
+            auto* any_ptr = std::any_cast<DestroyingPtr<T>*>(&m_underlying_any);
+            return any_ptr ? any_ptr->ptr : nullptr;
+        }
+
+        void Reset() {
+            m_underlying_any.reset();
+        }
+
+        void Swap(AnyPtr& other) {
+            std::swap(m_underlying_any, other.m_underlying_any);
+        }
+
+        bool HasValue() const {
+            return m_underlying_any.has_value();
+        }
+
+        // Delete copy
+        AnyPtr(const AnyPtr&) = delete;
+        AnyPtr& operator=(const AnyPtr&) = delete;
+    };
+}
 
 static const std::string _sharedEmptyString{};
 
@@ -47,91 +97,61 @@ struct Event {
     {
         _name = std::exchange(other._name, "");
         _capacity = std::exchange(other._capacity, 0u);
-        _data = std::exchange(other._data, nullptr);
-        _anyPtr = std::exchange(other._anyPtr, nullptr);
+        _storage = std::exchange(other._storage, nullptr);
+        _any_ptr = std::exchange(other._any_ptr, nullptr);
     }
 
     Event& operator=(Event&& other) noexcept
     {
-        if (this != &other) {
-            this->clear();
-            _name = std::exchange(other._name, "");
-            _capacity = std::exchange(other._capacity, 0u);
-            _data = std::exchange(other._data, nullptr);
-            _anyPtr = std::exchange(other._anyPtr, nullptr);
-        }
+        this->Swap(other);
         return *this;
     }
 
     ~Event()
     {
-        // If *_anyPtr contains an AnyPtr<T> object which points to the buffer,
+        // If *_any_ptr contains an AnyPtr<T> object which points to the buffer,
         // the object living in the buffer will be destroyed at the destructor of AnyPtr<T>
-        _anyPtr.reset();
-        delete [] _data;
+        _any_ptr.Reset();
+        delete[] _storage;
     }
 
-    // Constructs a new object of type T into the data block using placement new.
-    template <class T = void, class... Args>
-    T* construct(std::string_view name, Args&&... args)
+    // Constructs a new event without associated data
+    void Store(std::string_view name)
     {
-        static_assert(!(std::is_same_v<T, void> && sizeof...(Args) > 0),
-                      "Void event must not take constructor arguments.");
-        if (_anyPtr && _anyPtr->has_value())
-            *_anyPtr = std::any();  // Destroy the object currently living in the buffer by implicitly invoking AnyPtr<T> destructor.
-        if constexpr (std::is_same_v<T, void>) {
-            this->_name = name;
-            void* p = this->data();
-            return p;
-        } else {
-            this->reserve(sizeof(T));
-            ::new (this->_data) T{std::forward<Args>(args)...};
-            this->_name = name;
-            T* p = this->dataAs<T>();
-            // Store typed pointer into a type erased std::any object.
-            // Note that dynamic memory will not be allocated for AnyPtr<T> object due to Small Buffer Optimization.
-            _anyPtr->emplace<AnyPtr<T>>(p);
-            return p;
-        }
-    }
-
-    // Construct from a reference to an object of target type. Uses default copy / move constructor.
-    template <class T>
-    std::decay_t<T>* construct(std::string_view name, T&& t)
-    {
-        using TT = std::decay_t<T>;
-        if (_anyPtr && _anyPtr->has_value())
-            *_anyPtr = std::any();  // Destroy the object currently living in the buffer by implicitly invoking AnyPtr<T> destructor.
-        this->reserve(sizeof(TT));
-        ::new (this->_data) TT{std::forward<T>(t)};
+        _any_ptr.Reset();  // Destroy the object currently living in the buffer by implicitly invoking AnyPtr<T> destructor.
         this->_name = name;
-        TT* p = this->dataAs<TT>();
-        _anyPtr->emplace<AnyPtr<TT>>(p);
-        return p;
     }
 
-    // Destroys the object pointed by _data unless the type T is
-    // void or T is trivially destructible.
-    // After this call, the event will be empty.
-    template<class T = void>
-    void destroy(T* = nullptr)
-    {
-        if (_anyPtr && _anyPtr->has_value())
-            *_anyPtr = std::any();  // Destroy the object currently living in the buffer by implicitly invoking AnyPtr<T> destructor.
-        this->_name = "";
+    template<typename T>
+    std::remove_reference_t<T>& Store(std::string_view name, T&& data) {
+        _any_ptr.Reset();
+
+        this->Reserve(sizeof(T));
+        using Stored_t = std::remove_reference_t<T>;
+        Stored_t* ptr = std::construct_at(reinterpret_cast<Stored_t*>(_storage), std::forward<T>(data));
+        _any_ptr = ptr;
+
+        this->_name = name;
+
+        return *ptr;
     }
 
-    // Reinterprets the data buffer as an object of type T.
-    template<class T>
-    T* dataAs()
-    {
-        return std::launder(reinterpret_cast<T*>(this->data()));
-    }
+    template<typename T, typename... Args>
+    T& Emplace(std::string_view name, Args&&... args) {
+        _any_ptr.Reset();
 
-    template<class T>
-    const T* dataAs() const
-    {
-        return std::launder(reinterpret_cast<const T*>(this->data()));
+        this->Reserve(sizeof(T));
+        T* ptr = std::construct_at(reinterpret_cast<T*>(_storage), std::forward<Args>(args)...);
+
+        this->_name = name;
+
+        _any_ptr = ptr;
+        return *ptr;
+    }
+        
+    void Clear() {
+        _any_ptr.Reset();
+        this->_name.clear();
     }
 
     // Allows you to get a pointer to the payload of type T using syntax "event >> p" where T* p;
@@ -139,55 +159,84 @@ struct Event {
     // dereferening p. For example: "auto x = (event >> p) + 1;" means "event >> p; auto x = *p + 1;"
     // If the type of the object stored in the buffer is not T, an exception will be thrown.
     // So you can not accidentally read the data in a wrong format.
+    // template<class T>
+    // T& operator>>(T*& p)
+    // {
+    //     p = this->safeCast<T>();
+    //     return *p;
+    // }
     template<class T>
-    T& operator>>(T*& p)
-    {
-        p = this->safeCast<T>();
-        return *p;
+    T& Get() {
+        T* ptr = _any_ptr.TryExtract<T>();
+
+        if (ptr == nullptr) {
+            throw std::runtime_error("Attempt to extract data from Event which does not hold the requested type");
+        }
+
+        return *ptr;
+    }
+
+    template<class T>
+    const T& Get() const {
+        const T* ptr = _any_ptr.TryExtract<T>();
+
+        if (ptr == nullptr) {
+            throw std::runtime_error("Attempt to extract data from Event which does not hold the requested type");
+        }
+
+        return *ptr;
+    }
+
+    // Reinterprets the data buffer as an object of type T.
+    template<class T>
+    T& UncheckedGet() {
+        return std::launder(reinterpret_cast<T*>(_storage));
+    }
+
+    // Reinterprets the data buffer as an object of type T.
+    template<class T>
+    const T& UncheckedGet() const {
+        return std::launder(reinterpret_cast<const T*>(_storage));
     }
 
     // Returns pointer to the data buffer
-    void* data()
-    {
-        return _data;
+    void* Data() {
+        return _storage;
     }
 
-    const void* data() const
-    {
-        return _data;
+    const void* Data() const {
+        return _storage;
     }
 
-    // Releases the data allocated from the heap and empties the name.
-    void clear()
+    // Deletes all allocated data and resets the event to its default, empty state
+    void ReleaseStorage()
     {
-        if (!_data)
+        if (!_storage)
             return;
 
-        _anyPtr.reset(); // Destroy the object in the buffer, if any.
+        _any_ptr.Reset(); // Destroy the object in the buffer, if any.
         _name = "";
         _capacity = 0;
-        delete [] _data;
-        _data = nullptr;
+        delete[] _storage;
+        _storage = nullptr;
     }
 
     // Reserves space for event data. The existing data may be wiped out.
-    void reserve(std::size_t size)
-    {
+    void Reserve(std::size_t size) {
         if (_capacity < size) {
-            if (!_anyPtr)  // Make a new empty AnyPtr object
-                _anyPtr = std::make_unique_for_overwrite<std::any>();
-            else if (_anyPtr->has_value())
-                *_anyPtr = std::any{};   // Destroy the object in the buffer, if any.
+            if (_any_ptr.HasValue())  // Destroy the stored object if it exists
+                _any_ptr.Reset();
+
             _name = "";
             _capacity = size;
-            delete [] _data;
-            _data = new std::byte[size];
+            delete [] _storage;
+            _storage = new std::byte[size];
         }
     }
 
     // Returns the maximum size of an object which can be constructed
     // in the data buffer without reallocation.
-    std::size_t capacity() const { return _capacity; }
+    std::size_t Capacity() const { return _capacity; }
 
     // Returns true if the name of the event == other
     bool isEqual(const std::string_view& other) const { return (_name.compare(other) == 0); }
@@ -196,69 +245,38 @@ struct Event {
     bool isEmpty() const { return _name.empty(); }
 
     // Checks if the event has data in the buffer.
-    bool hasData() const { return (_anyPtr && _anyPtr->has_value()); }
+    bool HasData() const { return _any_ptr.HasValue(); }
 
     // Returns the name of the event as a string_view.
     std::string_view name() const { return _name; }
 
-    // The same as above but as a string.
-    std::string nameAsString() const { return std::string(_name); }
+    void Swap(Event& other) {
+        std::swap(_name, other._name);
+        std::swap(_capacity, other._capacity);
+        std::swap(_storage, other._storage);
+        _any_ptr.Swap(other._any_ptr);
+    }
 
 private:
     // Copying not allowed.
     Event(const Event&) = delete;
     Event& operator=(const Event&) = delete;
 
-    // A typed pointer to the object in the storage space.
-    // When AnyPtr is destroyed, the object in the storage is also destroyed.
-    template <class T>
-    struct AnyPtr
-    {
-        AnyPtr(T* p = nullptr) : ptr(p) {}
-        T* ptr;
-        ~AnyPtr()
-        {
-            if (ptr)
-                ptr->~T();
-        }
-    };
-
-    // No need for an explicit destructor call if T is trivially destructible.
-    template <Trivial T>
-    struct AnyPtr<T>
-    {
-        AnyPtr(T* p = nullptr) : ptr(p) {}
-        T* ptr;
-    };
-
-    // Get pointer to the data buffer if T is the type of the object in the buffer.
-    // Otherwise, throw an exception.
-    template <class T>
-    T* safeCast()
-    {
-        try {
-            if (_anyPtr && _anyPtr->has_value())
-                return std::any_cast<AnyPtr<T>&>(*_anyPtr).ptr;
-            else
-                throw std::runtime_error("dxfsm::Event does not contain data so data pointer can not be returned.");
-        }
-        catch (const std::bad_any_cast&) {
-            throw std::runtime_error("Attempt to store pointer to the object in dxfsm::Event into a variable of wrong type.");
-        }
-        return nullptr;
-    }
 
     // Name of the object store in the data buffer.
     // Should be empty if and only if there is no stored object.
-    std::string_view _name = "";
+    std::string _name = "";
     // Capacity of the data buffer in bytes
     std::size_t _capacity = 0;
     // Pointer to data buffer
-    std::byte* _data = nullptr;
-    // An std::any object which contains an object of type AnyPtr<T> where T is the type
-    // of the object living in the buffer. T = void if there is no object in the buffer.
-    std::unique_ptr<std::any> _anyPtr;
+    std::byte* _storage = nullptr;
+    
+    detail::AnyPtr _any_ptr{};
 }; // Event
+
+inline void swap(Event& lhs, Event& rhs) {
+    lhs.Swap(rhs);
+}
 
 // Returns true if the name of the event is sv.
 inline bool operator==(const Event& e, std::string_view sv)
@@ -331,24 +349,28 @@ struct State
     operator handle_type() const noexcept { return coro_handle_; }
 
     // Sets human-readable name for the state.
-    State&& setName(std::string stateName)
-    {
-        if (!stateName.empty())
-            coro_handle_.promise().name = std::move(stateName);
-        return std::move(*this);
+    State& Name(std::string_view state_name) & {
+        if (coro_handle_.address() == nullptr) {
+            throw std::runtime_error("Attempt to set the name of State not associated with a coroutine");
+        }
+
+        coro_handle_.promise().name = state_name;
+        return *this;
     }
 
-    // Alias for setName
-    State&& operator=(std::string stateName)
-    {
-        return std::move(setName(std::move(stateName)));
+    // Sets human-readable name for the state.
+    State&& Name(std::string_view state_name) && {
+        return std::move(this->Name(state_name));
     }
 
-    // Returns the name of the state coroutine.
-    const std::string& getName() const
-    {
+    std::string_view Name() const {
+        if (coro_handle_.address() == nullptr) {
+            throw std::runtime_error("Attempt to get the name of a State not associated with a coroutine");
+        }
+
         return coro_handle_.promise().name;
     }
+
 
     // False if the state is still waiting in initial_suspend.
     // True if the initial await has been resumed /typically by calling dxfsm::start())
@@ -614,6 +636,49 @@ public:
         return Awaitable{this};
     }
 
+    struct Awaitable2
+    {
+        FSM* self;
+        Event* event_return{};
+
+        constexpr bool await_ready() {return false;}
+        std::coroutine_handle<> await_suspend(StateHandle fromState)
+        {
+            const Event& onEvent = self->latestEvent();
+            // If a state emits an empty event all states will remain suspended.
+            // Consequently, the FSM will stopped. It can be restarted by calling sendEvent()
+            if (onEvent.isEmpty()) {
+                self->_bIsActive.store(false, std::memory_order_relaxed);
+                return std::noop_coroutine();
+            }
+
+            std::optional<StateHandle> next_state = self->DoPotentialTransition(onEvent);
+
+            if (!next_state.has_value()) {
+                throw std::runtime_error("FSM '" + self->name() + "' can't find transition from state '" +
+                                         std::string(fromState.promise().name) +
+                                         "' on event '" + std::string(onEvent.name()) + "'.\nPlease fix the transition table.");
+            }
+
+            return *next_state;
+        }
+
+        void await_resume()
+        {
+            if (self->_event.isEmpty())
+                throw std::runtime_error("FSM '" + self->name() +  "': An empty event has been sent to state " + self->currentState());
+            
+            *event_return = std::move(self->_event);
+        }
+    };
+
+    friend struct Awaitable2;
+
+    Awaitable2 emitAndReceive2(Event& e) {
+        this->_event = std::move(e);
+        return Awaitable2{this, &e};
+    }
+
     struct InitialAwaitable
     {
         FSM* self;
@@ -640,8 +705,12 @@ public:
     // Returns the index of the vector to which the state was stored.
     std::size_t addState(State&& state)
     {
-        if (hasState(state.getName()))
-            throw std::runtime_error("A state with name '" + state.getName() + "' already exists in FSM " + _name);
+        if (hasState(state.Name()))
+            throw std::runtime_error(std::format(
+                "A state with name '{}' already exists in FSM {}",
+                state.Name(),
+                _name
+            ));
 
         if (state.handle())
             _vecStates.push_back(std::move(state));
@@ -702,7 +771,7 @@ public:
      {
         // Find the name from the list of states
         for (const State& state : _vecStates)
-            if (state.getName() == name)
+            if (state.Name() == name)
                 return state;
         throw std::runtime_error("FSM('" + _name + "'): findState() did not find the requested name '" + std::string(name) + "'");
      }
@@ -711,7 +780,7 @@ public:
      std::size_t findIndex(SV name) const
      {
          for (std::size_t i = 0; i < _vecStates.size(); ++i)
-             if (_vecStates[i].getName() == name)
+             if (_vecStates[i].Name() == name)
                  return i;
         throw std::runtime_error("FSM('" + _name + "'): findIndex() did not find the requested name '" + std::string(name) + "'");
      }
@@ -721,7 +790,7 @@ public:
      {
         // Find the name from the list of states
         for (const State& state : this->_vecStates)
-            if (state.getName() == name)
+            if (state.Name() == name)
                 return true;
          return false;
      }
@@ -745,9 +814,9 @@ private:
     StateHandle findHandle(SV name) const
     {
     // Find the name from the list of states
-    for (const State& state : _vecStates)
-        if (state.getName() == name)
-            return state.handle();
+        for (const State& state : _vecStates)
+            if (state.Name() == name)
+                return state.handle();
         return nullptr;
     }
 
