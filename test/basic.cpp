@@ -8,10 +8,18 @@
 using namespace dxfsm;
 
 struct CollatzFsm {
+    enum class EventId {
+        Start,
+        ProcessValue,
+        Finish
+    };
+
+    using Event_t = Event<EventId>;
+
     FSM fsm{"CollatzFsm"};
     
     std::vector<int> sequence{};
-    std::vector<std::string> event_names{};
+    std::vector<EventId> event_ids{};
 
     CollatzFsm() {
         fsm << StateStart(fsm).Name("StateStart")
@@ -33,13 +41,13 @@ struct CollatzFsm {
 
         while (true) {
             sequence.clear();
-            event_names.clear();
+            event_ids.clear();
 
-            event_names.push_back(std::string(event.name()));
+            event_ids.push_back(event.GetId());
             
             auto start_value = event.Get<int>();
 
-            event.Store("ProcessValue", start_value);
+            event.Store(EventId::ProcessValue, start_value);
             co_await fsm.emitAndReceive2(event);
         }
     }
@@ -48,7 +56,7 @@ struct CollatzFsm {
         Event event = co_await fsm.getEvent();
 
         while (true) {
-            event_names.push_back(std::string(event.name()));
+            event_ids.push_back(event.GetId());
 
             auto& cur_value = event.Get<int>();
 
@@ -56,7 +64,7 @@ struct CollatzFsm {
 
             if (cur_value == 1) {
                 // Replace the current event with a Finish event
-                event.Store("Finish");
+                event.Store(EventId::Finish);
             } else {
                 // Change the value in the current event in-place
                 if (cur_value % 2 == 0) {
@@ -74,7 +82,7 @@ struct CollatzFsm {
         Event event = co_await fsm.getEvent();
 
         while (true) {
-            event_names.push_back(std::string(event.name()));
+            event_ids.push_back(event.GetId());
 
             event = co_await fsm.getEvent();
         }
@@ -84,8 +92,7 @@ struct CollatzFsm {
 TEST_CASE( "Collatz FSM", "[basic][events][names]" ) {
     CollatzFsm collatz{};
 
-    Event event;
-    event.Store("Start", 15);
+    CollatzFsm::Event_t event(CollatzFsm::EventId::Start, 15);
     collatz.fsm.sendEvent(&event);
 
     auto odds = collatz.sequence | std::views::filter([](int x) { return x % 2 != 0; });

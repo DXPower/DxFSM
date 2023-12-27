@@ -3,8 +3,6 @@
 
 #include <coroutine>
 #include <memory>
-#include <sstream>
-#include <iomanip>
 #include <string_view>
 #include <utility>
 #include <stdexcept>
@@ -13,13 +11,13 @@
 #include <vector>
 #include <array>
 #include <concepts>
-#include <unordered_map>
-#include <initializer_list>
-#include <assert.h>
+#include <cassert>
 #include <atomic>
 #include <any>
 #include <optional>
 #include <format>
+#include <algorithm>
+#include <variant>
 
 namespace dxfsm {
 namespace detail {
@@ -81,8 +79,6 @@ namespace detail {
 
 static const std::string _sharedEmptyString{};
 
-template <class T>
-concept Trivial = (std::is_trivially_destructible_v<T> || std::is_same_v<T, void>);
 
 // Generic reusable Event class.
 // An object of this type hold its identity in a string_view
@@ -91,24 +87,37 @@ concept Trivial = (std::is_trivially_destructible_v<T> || std::is_same_v<T, void
 // of the new event in the buffer. If the buffer is too small
 // for the data, it will be extended a bit like std::vector does.
 // The buffer never shrinks but can be reset to zero lenght like std::vector.
+template<typename Id>
 struct Event {
+    using Id_t = Id;
+
     Event() noexcept = default;
-    Event(Event&& other) noexcept
-    {
-        _name = std::exchange(other._name, "");
+    Event(Id id) noexcept : _id(id) { }
+
+    template<typename T>
+    Event(Id id, T&& data) {
+        Store(id, std::forward<T>(data));
+    }
+
+    template<typename T, typename... Args >
+    Event(Id id, std::in_place_type_t<T> type [[maybe_unused]], Args&&... args) {
+        Emplace<T>(id, std::forward<Args>(args)...);
+    }
+
+    // Moves
+    Event(Event&& other) noexcept {
+        _id = std::exchange(other._id, "");
         _capacity = std::exchange(other._capacity, 0u);
         _storage = std::exchange(other._storage, nullptr);
         _any_ptr = std::exchange(other._any_ptr, nullptr);
     }
 
-    Event& operator=(Event&& other) noexcept
-    {
+    Event& operator=(Event&& other) noexcept {
         this->Swap(other);
         return *this;
     }
 
-    ~Event()
-    {
+    ~Event() {
         // If *_any_ptr contains an AnyPtr<T> object which points to the buffer,
         // the object living in the buffer will be destroyed at the destructor of AnyPtr<T>
         _any_ptr.Reset();
@@ -116,14 +125,16 @@ struct Event {
     }
 
     // Constructs a new event without associated data
-    void Store(std::string_view name)
+    void Store(Id id)
     {
+        this->_id = id;
         _any_ptr.Reset();  // Destroy the object currently living in the buffer by implicitly invoking AnyPtr<T> destructor.
-        this->_name = name;
     }
 
     template<typename T>
-    std::remove_reference_t<T>& Store(std::string_view name, T&& data) {
+    std::remove_reference_t<T>& Store(Id id, T&& data) {
+        this->_id = id;
+
         _any_ptr.Reset();
 
         this->Reserve(sizeof(T));
@@ -131,40 +142,29 @@ struct Event {
         Stored_t* ptr = std::construct_at(reinterpret_cast<Stored_t*>(_storage), std::forward<T>(data));
         _any_ptr = ptr;
 
-        this->_name = name;
-
         return *ptr;
     }
 
     template<typename T, typename... Args>
-    T& Emplace(std::string_view name, Args&&... args) {
+    T& Emplace(Id id, Args&&... args) {
+        this->_id = id;
+
         _any_ptr.Reset();
 
         this->Reserve(sizeof(T));
         T* ptr = std::construct_at(reinterpret_cast<T*>(_storage), std::forward<Args>(args)...);
-
-        this->_name = name;
 
         _any_ptr = ptr;
         return *ptr;
     }
         
     void Clear() {
+        this->_id.reset();
         _any_ptr.Reset();
-        this->_name.clear();
     }
 
-    // Allows you to get a pointer to the payload of type T using syntax "event >> p" where T* p;
-    // Returns reference to the payload object so you can also use the result directly without
-    // dereferening p. For example: "auto x = (event >> p) + 1;" means "event >> p; auto x = *p + 1;"
     // If the type of the object stored in the buffer is not T, an exception will be thrown.
     // So you can not accidentally read the data in a wrong format.
-    // template<class T>
-    // T& operator>>(T*& p)
-    // {
-    //     p = this->safeCast<T>();
-    //     return *p;
-    // }
     template<class T>
     T& Get() {
         T* ptr = _any_ptr.TryExtract<T>();
@@ -187,15 +187,25 @@ struct Event {
         return *ptr;
     }
 
+    template<class T>
+    T* GetMaybe() {
+        return _any_ptr.TryExtract<T>();
+    }
+
+    template<class T>
+    const T* GetMaybe() const {
+        return _any_ptr.TryExtract<T>();
+    }
+
     // Reinterprets the data buffer as an object of type T.
     template<class T>
-    T& UncheckedGet() {
+    T& GetUnchecked() {
         return std::launder(reinterpret_cast<T*>(_storage));
     }
 
     // Reinterprets the data buffer as an object of type T.
     template<class T>
-    const T& UncheckedGet() const {
+    const T& GetUnchecked() const {
         return std::launder(reinterpret_cast<const T*>(_storage));
     }
 
@@ -211,14 +221,7 @@ struct Event {
     // Deletes all allocated data and resets the event to its default, empty state
     void ReleaseStorage()
     {
-        if (!_storage)
-            return;
-
-        _any_ptr.Reset(); // Destroy the object in the buffer, if any.
-        _name = "";
-        _capacity = 0;
-        delete[] _storage;
-        _storage = nullptr;
+        this->swap({});
     }
 
     // Reserves space for event data. The existing data may be wiped out.
@@ -227,7 +230,7 @@ struct Event {
             if (_any_ptr.HasValue())  // Destroy the stored object if it exists
                 _any_ptr.Reset();
 
-            _name = "";
+            _id.reset();
             _capacity = size;
             delete [] _storage;
             _storage = new std::byte[size];
@@ -239,19 +242,19 @@ struct Event {
     std::size_t Capacity() const { return _capacity; }
 
     // Returns true if the name of the event == other
-    bool isEqual(const std::string_view& other) const { return (_name.compare(other) == 0); }
+    bool operator==(Id id) const { return _id.has_value() && _id.value() == id; }
 
-    // Returns true if the event is empty (i.e. name string is not set)
-    bool isEmpty() const { return _name.empty(); }
+    // Returns true if the event is empty (i.e. _id is not set)
+    [[nodiscard]] bool Empty() const { return !_id.has_value(); }
 
-    // Checks if the event has data in the buffer.
+    // Checks if the event has stored data associated with it
     bool HasData() const { return _any_ptr.HasValue(); }
 
     // Returns the name of the event as a string_view.
-    std::string_view name() const { return _name; }
+    Id GetId() const { return _id; }
 
     void Swap(Event& other) {
-        std::swap(_name, other._name);
+        std::swap(_id, other._id);
         std::swap(_capacity, other._capacity);
         std::swap(_storage, other._storage);
         _any_ptr.Swap(other._any_ptr);
@@ -263,38 +266,18 @@ private:
     Event& operator=(const Event&) = delete;
 
 
-    // Name of the object store in the data buffer.
-    // Should be empty if and only if there is no stored object.
-    std::string _name = "";
+    std::optional<Id> _id{};
     // Capacity of the data buffer in bytes
-    std::size_t _capacity = 0;
+    std::size_t _capacity{};
     // Pointer to data buffer
-    std::byte* _storage = nullptr;
+    std::byte* _storage{};
     
     detail::AnyPtr _any_ptr{};
 }; // Event
 
-inline void swap(Event& lhs, Event& rhs) {
+template<typename Id>
+inline void swap(Event<Id>& lhs, Event<Id>& rhs) {
     lhs.Swap(rhs);
-}
-
-// Returns true if the name of the event is sv.
-inline bool operator==(const Event& e, std::string_view sv)
-{
-    return e.isEqual(sv);
-}
-
-inline bool operator==(std::string_view sv, const Event& e)
-{
-    return e.isEqual(sv);
-}
-
-// Returns a string which contains pointer p in hex format.
-inline std::string asHex(void* p)
-{
-    std::stringstream ss;
-    ss << std::hex << std::showbase << p << std::noshowbase << std::dec;
-    return ss.str();
 }
 
 inline std::string asHex(std::coroutine_handle<> h)
@@ -302,421 +285,400 @@ inline std::string asHex(std::coroutine_handle<> h)
     return asHex(h.address());
 }
 
+template<typename StateId, typename EventId>
+class FSM;
+
 // Return type of coroutines which represent states.
-struct State
-{
-    struct promise_type
-    {
-        struct InitialAwaitable
-        {
+template<typename StateId>
+struct State {
+    struct InfoView {
+        StateId id;
+        std::string_view name;
+    };
+
+    struct promise_type {
+        // Awaitable returned when the coroutine is first constructed
+        struct InitialAwaitable {
             promise_type* self = nullptr;
             constexpr bool await_ready() {return false;}
             void await_suspend(std::coroutine_handle<promise_type>) {}
             void await_resume() { self->bIsStarted = true; } // The state was resumed from initial_suspend
         };
 
-        promise_type()
-        {   // Initialize the name as the hex address.
-            // The user may choose to replace it later with a better name.
-            // Note that typically a string whose length is <= 22 is subject to
-            // short string optimization so a hex address does not allocate from the heap.
-            void* addr = std::coroutine_handle<promise_type>::from_promise(*this).address();
-            name = asHex(addr);
-        }
+        promise_type() = delete; // State must take FSM& and Id parameters
+        template<typename EventId> 
+        promise_type(FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id) : id(id) { }
+
         InitialAwaitable initial_suspend() noexcept { return InitialAwaitable{this}; }
         constexpr std::suspend_always final_suspend() noexcept { return {}; }
         State get_return_object() noexcept { return State(this); };
         void unhandled_exception() { throw; }
-        void return_void()
-        {
+        void return_void() {
             // State coroutines must never return.
-            throw std::runtime_error("State coroutine '" + name + "' is not allowed to co_return.");
+            throw std::runtime_error("State coroutine is not allowed to co_return.");
         }
 
-        std::string name;
-        // false if the state is waiting at initial_suspend,
-        // true if the state has been resumed from the initial_suspend.
+        InfoView GetInfoView() const {
+            return InfoView{
+                .id = id,
+                .name = name
+            };
+        }
 
-        bool bIsStarted = false;
-    }; // promise_type
+        StateId id;
+        std::string name;
+
+        // Only false before fsm.start() is called after the state has been added
+        bool is_started = false;
+    };
 
     using handle_type = std::coroutine_handle<promise_type>;
 
-    // Returns the handle to the state coroutine.
-    handle_type handle() const noexcept { return coro_handle_; }
+    // State has one-to-one correspondence to its coroutine handle
+    handle_type handle() const noexcept { return m_coro_handle; }
 
     // State has one-to-one correspondence to its coroutine handle
-    operator handle_type() const noexcept { return coro_handle_; }
+    operator handle_type() const noexcept { return m_coro_handle; }
+
+    StateId Id() const {
+        if (m_coro_handle.address() == nullptr) {
+            throw std::runtime_error("Attempt to get the ID of a state not associated with a coroutine");
+        }
+
+        return m_coro_handle.promise().id;
+    }
 
     // Sets human-readable name for the state.
-    State& Name(std::string_view state_name) & {
-        if (coro_handle_.address() == nullptr) {
+    State& Name(std::string state_name) & {
+        if (m_coro_handle.address() == nullptr) {
             throw std::runtime_error("Attempt to set the name of State not associated with a coroutine");
         }
 
-        coro_handle_.promise().name = state_name;
+        m_coro_handle.promise().name = std::move(state_name);
         return *this;
     }
 
     // Sets human-readable name for the state.
-    State&& Name(std::string_view state_name) && {
+    State&& Name(std::string state_name) && {
         return std::move(this->Name(state_name));
     }
 
+    // Gets the human-readable name for the state.
     std::string_view Name() const {
-        if (coro_handle_.address() == nullptr) {
+        if (m_coro_handle.address() == nullptr) {
             throw std::runtime_error("Attempt to get the name of a State not associated with a coroutine");
         }
 
-        return coro_handle_.promise().name;
+        return m_coro_handle.promise().name;
     }
 
-
     // False if the state is still waiting in initial_suspend.
-    // True if the initial await has been resumed /typically by calling dxfsm::start())
-    bool isStarted() const
-    {
-        return coro_handle_.promise().bIsStarted;
+    // True if the initial await has been resumed, typically by calling dxfsm::start())
+    bool IsStarted() const {
+        return m_coro_handle.promise().is_started;
     }
 
     // Move constructors.
-    State(State&& other) noexcept : coro_handle_(std::exchange(other.coro_handle_, nullptr)) {}
+    State(State&& other) noexcept : m_coro_handle(std::exchange(other.m_coro_handle, nullptr)) {}
 
-    State& operator=(State&& other) noexcept
-    {
-        coro_handle_ = std::exchange(other.coro_handle_, nullptr);
+    State& operator=(State&& other) noexcept {
+        m_coro_handle = std::exchange(other.m_coro_handle, nullptr);
         return *this;
     }
 
     ~State() {
-        if (coro_handle_)
-            coro_handle_.destroy();
+        if (m_coro_handle)
+            m_coro_handle.destroy();
     }
 private:
     // A state is move-only
     State(const State&) = delete;
     State& operator=(const State&) = delete;
 
-    explicit State(promise_type *p) noexcept : coro_handle_(handle_type::from_promise(*p)) {}
+    explicit State(promise_type *p) noexcept : m_coro_handle(handle_type::from_promise(*p)) {}
 
-    handle_type coro_handle_;
+    handle_type m_coro_handle;
 }; // State
 
-// A state can be presented either as a name string or as a coroutine handle.
-template<class T>
-concept StateType = std::convertible_to<T, std::string_view> || std::convertible_to<T, typename State::handle_type>;
-
-class FSM;
-
-// Type for setting transition {from-state, on-event} --> {to-state of targetFSM}
-template <class FROM, class EVENT, class TO>
-struct Transition
-{
-    Transition(const FROM& f, const EVENT& e, const TO& t, FSM* tf) : from(f), event(e), to(t), targetFSM(tf) {}
-    const FROM& from;
-    const EVENT& event;
-    const TO& to;
-    FSM* targetFSM;
-};
-
-// A helper which allows you to add transitions with syntax
-// "fsm << transition(from1, event1, to1) << transition(from2, event2, to2) << ..."
-template <StateType FROM, std::convertible_to<std::string_view> EVENT, StateType TO>
-inline auto transition(const FROM& from, const EVENT& event, const TO& to, FSM* targetFSM = nullptr)
-{
-    return Transition{from, event, to, targetFSM};
-}
-
-// A helper which allows you to remove transitions with syntax
-// "fsm >> transition(from1, event1) >> transition(from2, event2) >> ..."
-template <StateType FROM, std::convertible_to<std::string_view> EVENT>
-inline auto transition(const FROM& from, const EVENT& event)
-{
-    return Transition{from, event, nullptr, nullptr};
-}
-
-
 // Finite State Machine class
+template<typename StateId, typename EventId>
 class FSM {
 public:
-    using StateHandle = typename State::handle_type;
-    using SV = std::string_view;
+    using State_t = State<StateId>;
+    using Event_t = Event<EventId>;
+    using StateHandle = typename State_t::handle_type;
 
     // Gives the FSM a human-readable name.
-    // If the name is empty, use hex address of the FSM object.
-    FSM(std::string fsmName) : _name(std::move(fsmName))
-    {
-        if (_name.empty())  // If the user did not provide a name, use a dummy one.
-            _name = asHex(this);
-    };
+    FSM() = default;
+    FSM(std::string fsm_name) : _name(std::move(fsm_name)) { }
 
-    FSM()  { _name = asHex(this); };
+    // Delete copies and moves
+    // TODO: implement moves
     FSM(const FSM&) = delete;
+    FSM(FSM&&) = delete;
     FSM& operator=(const FSM&) = delete;
-    ~FSM() = default;
+    FSM& operator=(FSM&&) = delete;
 
-    // Returns the name of the FSM
-    const std::string& name() const { return _name; }
+    // Get the human-readable name of the FSM
+    std::string_view Name() const { return _name; }
+
+    // Set the human-readable name of the FSM
+    FSM& Name(std::string name) { _name = std::move(name); }
 
     // The event that was sent in the latest transition
-    const Event& latestEvent() const { return _event; }
+    // const Event& latestEvent() const { return _event; }
 
     // Returns the name of the target state of the latest transition.
-    const std::string& currentState() const { return _state ? _state.promise().name : _sharedEmptyString; }
-
-    // Sets the current state. The next event will come to this state.
-    FSM& setState(const State& state)
-    {
-        _state = state.handle();
-        return *this;
+    auto GetCurrentState() const -> std::optional<typename State_t::Info> {
+        if (!_state) {
+            return std::nullopt;
+        }
+        
+        return _state.promise().GetInfoView();
     }
 
-    FSM& setState(SV stateName)
+    // // Sets the current state. The next event will come to this state.
+    // FSM& setState(const State& state)
+    // {
+    //     _state = state.handle();
+    //     return *this;
+    // }
+
+    FSM& SetState(StateId id)
     {
-        _state = findHandle(stateName);
+        _state = FindState(id).handle();
         if (!_state)
             throw std::runtime_error("FSM('" + _name + "'): setState() did not find the requested state '" + std::string(stateName) + "'");
         return *this;
     }
 
-    // Adds transition from state 'from' to state 'to' on event 'onEvent' which lives in FSM 'targetFSM'.
-    // targetFSM==nullptr means this FSM, so the 4th argument can be omitted if every state
-    // refers to the same FSM.
-    // Returns true if {from, onEvent} pair has not been routed previously.
-    // Returns false if an existing destination is replaced with '{to, targetFSM}'.
-    // Typically should return true unless you deliberately modify the state machine on the fly.
-    bool addTransition(StateHandle from, SV onEvent, StateHandle to, FSM* targetFSM = nullptr)
-    {
-        targetFSM = targetFSM ? targetFSM : this;
-        return _mapTransitionTable.insert_or_assign({from, onEvent}, TransitionTarget{to, targetFSM}).second;
-    }
+    using HandleOrId = std::variant<StateHandle, StateId>;
 
-    // The same as above but the states are identified by their names (i.e. strings)
-    bool addTransition(SV fromState, SV onEvent, SV toState, FSM* targetFSM = nullptr)
-    {
-        targetFSM = targetFSM ? targetFSM : this;
-        StateHandle fromHandle = this->findHandle(fromState);
-        if (!fromHandle)
-            throw std::runtime_error("FSM('" + _name + "'): addTransition() did not find the requested source state '" + std::string(fromState) + "'.");
-        StateHandle toHandle = targetFSM->findHandle(toState);
-        if (!toHandle)
-            throw std::runtime_error("FSM('" + _name + "'): addTransition() did not find the requested target state'" + std::string(toState) + "'.");
+    FSM& AddTransition(HandleOrId from, EventId event, HandleOrId to) {
+        auto GetHandle = [this]<typename T>(const T& hoi) -> StateHandle {
+            if constexpr (std::is_same_v<T, StateHandle>) {
+                return hoi;
+            } else if constexpr (std::is_same_v<T, StateId>) {
+                return FindState(hoi)->handle();
+            }
+        };
 
-        return addTransition(fromHandle, onEvent, toHandle, targetFSM);
-    }
+        auto from_handle = std::visit(GetHandle, from);
+        auto to_handle = std::visit(GetHandle, to);
 
-    bool addTransition(StateHandle fromHandle, SV onEvent, SV toState, FSM* targetFSM = nullptr)
-    {
-        targetFSM = targetFSM ? targetFSM : this;
-        StateHandle toHandle = targetFSM->findHandle(toState);
-        if (!toHandle)
-            throw std::runtime_error("FSM('" + _name + "'): addTransition() did not find the requested target state'" + std::string(toState) + "'.");
-        return addTransition(fromHandle, onEvent, toHandle, targetFSM);
-    }
+        m_transition_table.emplace(
+            PartialTransition{
+                .from = from_handle,
+                .event = std::move(event)
+            },
+            TransitionTarget{
+                .state = to_handle,
+                .fsm = nullptr
+            }
+        );
 
-    bool addTransition(SV fromState, SV onEvent, StateHandle toHandle, FSM* targetFSM = nullptr)
-    {
-        targetFSM = targetFSM ? targetFSM : this;
-        StateHandle fromHandle = this->findHandle(fromState);
-        if (!fromHandle)
-            throw std::runtime_error("FSM('" + _name + "'): addTransition() did not find the requested source state '" + std::string(fromState) + "'.");
-        return addTransition(fromHandle, onEvent, toHandle, targetFSM);
-    }
-
-    // A shortcut for writing "fsm << transition(from, event, to)" instead of "fsm.addTransition(from, event, to)"
-    template <StateType FROM, std::convertible_to<std::string_view> EVENT, StateType TO>
-    FSM& operator<<(const Transition<FROM,EVENT,TO>& fromEventTo)
-    {
-        addTransition(fromEventTo.from, fromEventTo.event, fromEventTo.to, fromEventTo.targetFSM);
         return *this;
     }
 
+    // // Adds transition from state 'from' to state 'to' on event 'onEvent' which lives in FSM 'targetFSM'.
+    // // targetFSM==nullptr means this FSM, so the 4th argument can be omitted if every state
+    // // refers to the same FSM.
+    // // Returns true if {from, onEvent} pair has not been routed previously.
+    // // Returns false if an existing destination is replaced with '{to, targetFSM}'.
+    // // Typically should return true unless you deliberately modify the state machine on the fly.
+    
+
+    // TODO: readd remove transition
     // Removes transition triggered by event 'onEvent' sent from 'fromState'.
     // Return true if the transition was found and successfully removed.
-    bool removeTransition(StateHandle fromState, SV onEvent)
-    {
-        auto erased = _mapTransitionTable.erase({fromState, onEvent});
-        return bool(erased);
-    }
+    // bool removeTransition(StateHandle fromState, SV onEvent)
+    // {
+    //     auto erased = m_transition_table.erase({fromState, onEvent});
+    //     return bool(erased);
+    // }
 
-    bool removeTransition(SV fromState, SV onEvent)
-    {
-        auto erased = _mapTransitionTable.erase({findHandle(fromState), onEvent});
-        return bool(erased);
-    }
+    // bool removeTransition(SV fromState, SV onEvent)
+    // {
+    //     auto erased = m_transition_table.erase({FindHandle(fromState), onEvent});
+    //     return bool(erased);
+    // }
 
-    // A shortcut for writing "fsm >> transition(from, event)" instead of "fsm.removeTransition(from, event)"
-    template <StateType FROM, std::convertible_to<std::string_view> EVENT, class TO>
-    FSM& operator>>(const Transition<FROM,EVENT,TO>& fromEventTo)
-    {
-        removeTransition(fromEventTo.from, fromEventTo.event);
-        return *this;
-    }
-
+    // TODO: readd hasTransition
     // Return true if the FSM knows how to deal with event 'onEvent' sent from state 'fromState'.
-    bool hasTransition(StateHandle fromState, SV onEvent)
-    {
-        return _mapTransitionTable.contains({fromState, onEvent});
-    }
+    // bool hasTransition(StateHandle fromState, SV onEvent)
+    // {
+    //     return m_transition_table.contains({fromState, onEvent});
+    // }
 
-    bool hasTransition(SV fromState, SV onEvent)
-    {
-        return _mapTransitionTable.contains({findHandle(fromState), onEvent});
-    }
+    // bool hasTransition(SV fromState, SV onEvent)
+    // {
+    //     return m_transition_table.contains({FindHandle(fromState), onEvent});
+    // }
 
-    // Returns a vector of transition triplets {from-state, on-event, to-state}
-    std::vector<std::array<SV, 3>> getTransitions() const
-    {
-        std::vector<std::array<SV, 3>> vecResult(_mapTransitionTable.size());
-        for (std::size_t i = 0; const auto& [fromStateOnEvent, toState] : _mapTransitionTable) {
-            auto& triple = vecResult[i++];
-            triple[0] = fromStateOnEvent.first.promise().name;
-            triple[1] = fromStateOnEvent.second;
-            triple[2] = toState.state.promise().name;
-        }
-        return vecResult;
-    }
+    // // Returns a vector of transition triplets {from-state, on-event, to-state}
+    // std::vector<std::array<SV, 3>> getTransitions() const
+    // {
+    //     std::vector<std::array<SV, 3>> vecResult(m_transition_table.size());
+    //     for (std::size_t i = 0; const auto& [fromStateOnEvent, toState] : m_transition_table) {
+    //         auto& triple = vecResult[i++];
+    //         triple[0] = fromStateOnEvent.first.promise().name;
+    //         triple[1] = fromStateOnEvent.second;
+    //         triple[2] = toState.state.promise().name;
+    //     }
+    //     return vecResult;
+    // }
 
+    // TODO: readd targetSTate
     // Finds the target state of 'onEvent' when sent from 'fromState'.
     // Returns an empty string if not found.
-    const std::string& targetState(StateHandle fromState, SV onEvent)
-    {
-       auto it = _mapTransitionTable.find({fromState, onEvent});
-       if (it == _mapTransitionTable.end())
-           return _sharedEmptyString;
-        else
-            return it->second.state.promise().name;
-    }
+    // const std::string& targetState(StateHandle fromState, SV onEvent)
+    // {
+    //    auto it = m_transition_table.find({fromState, onEvent});
+    //    if (it == m_transition_table.end())
+    //        return _sharedEmptyString;
+    //     else
+    //         return it->second.state.promise().name;
+    // }
 
-    const std::string& targetState(SV fromState, SV onEvent)
-    {
-        return targetState(findHandle(fromState), onEvent);
-    }
+    // const std::string& targetState(SV fromState, SV onEvent)
+    // {
+    //     return targetState(FindHandle(fromState), onEvent);
+    // }
 
-    struct Awaitable
-    {
-        FSM* self;
-        constexpr bool await_ready() {return false;}
-        std::coroutine_handle<> await_suspend(StateHandle fromState)
-        {
-            const Event& onEvent = self->latestEvent();
-            // If a state emits an empty event all states will remain suspended.
-            // Consequently, the FSM will stopped. It can be restarted by calling sendEvent()
-            if (onEvent.isEmpty()) {
-                self->_bIsActive.store(false, std::memory_order_relaxed);
-                return std::noop_coroutine();
-            }
+    // struct Awaitable
+    // {
+    //     FSM* self;
+    //     constexpr bool await_ready() {return false;}
+    //     std::coroutine_handle<> await_suspend(StateHandle fromState)
+    //     {
+    //         const Event& onEvent = self->latestEvent();
+    //         // If a state emits an empty event all states will remain suspended.
+    //         // Consequently, the FSM will stopped. It can be restarted by calling sendEvent()
+    //         if (onEvent.isEmpty()) {
+    //             self->m_is_fsm_active.store(false, std::memory_order_relaxed);
+    //             return std::noop_coroutine();
+    //         }
 
-            std::optional<StateHandle> next_state = self->DoPotentialTransition(onEvent);
+    //         std::optional<StateHandle> next_state = self->DoPotentialTransition(onEvent);
 
-            if (!next_state.has_value()) {
-                throw std::runtime_error("FSM '" + self->name() + "' can't find transition from state '" +
-                                         std::string(fromState.promise().name) +
-                                         "' on event '" + std::string(onEvent.name()) + "'.\nPlease fix the transition table.");
-            }
+    //         if (!next_state.has_value()) {
+    //             throw std::runtime_error("FSM '" + self->name() + "' can't find transition from state '" +
+    //                                      std::string(fromState.promise().name) +
+    //                                      "' on event '" + std::string(onEvent.name()) + "'.\nPlease fix the transition table.");
+    //         }
 
-            return *next_state;
-        }
+    //         return *next_state;
+    //     }
 
-        Event await_resume()
-        {
-            if (self->_event.isEmpty())
-                throw std::runtime_error("FSM '" + self->name() +  "': An empty event has been sent to state " + self->currentState());
-            return std::move(self->_event);
-        }
-    };
+    //     Event await_resume()
+    //     {
+    //         if (self->_event.isEmpty())
+    //             throw std::runtime_error("FSM '" + self->name() +  "': An empty event has been sent to state " + self->currentState());
+    //         return std::move(self->_event);
+    //     }
+    // };
 
-    friend struct Awaitable;
+    // friend struct Awaitable;
 
     // Emits the given event and returns an awaitable which gives
     // the next event sent to the awaiting state coroutine.
-    Awaitable emitAndReceive(Event* e)
-    {
-        this->_event = std::move(*e);
-        return Awaitable{this};
-    }
+    // Awaitable emitAndReceive(Event* e)
+    // {
+    //     this->_event = std::move(*e);
+    //     return Awaitable{this};
+    // }
 
-    struct Awaitable2
-    {
+    struct EmitReceiveAwaitable {
         FSM* self;
-        Event* event_return{};
+        EventId* event_return{};
 
         constexpr bool await_ready() {return false;}
-        std::coroutine_handle<> await_suspend(StateHandle fromState)
-        {
-            const Event& onEvent = self->latestEvent();
+        std::coroutine_handle<> await_suspend(StateHandle fromState) {
+            const Event_t& pending_event = self->m_event_for_next_resume;
+            
             // If a state emits an empty event all states will remain suspended.
-            // Consequently, the FSM will stopped. It can be restarted by calling sendEvent()
-            if (onEvent.isEmpty()) {
-                self->_bIsActive.store(false, std::memory_order_relaxed);
+            // Consequently, the FSM will stopped. It can be restarted by calling SendEvent()
+            if (pending_event.Empty()) {
+                self->m_is_fsm_active.store(false, std::memory_order_relaxed);
                 return std::noop_coroutine();
             }
 
-            std::optional<StateHandle> next_state = self->DoPotentialTransition(onEvent);
+            std::optional<StateHandle> next_state = self->DoPotentialTransition(pending_event);
 
             if (!next_state.has_value()) {
-                throw std::runtime_error("FSM '" + self->name() + "' can't find transition from state '" +
-                                         std::string(fromState.promise().name) +
-                                         "' on event '" + std::string(onEvent.name()) + "'.\nPlease fix the transition table.");
+                throw std::runtime_error(std::format(
+                    "FSM '{}' can't find transition from state '{}' for given event. Please fix the transition table",
+                    self->Name(), fromState.promise().name
+                ));
             }
 
             return *next_state;
         }
 
-        void await_resume()
-        {
-            if (self->_event.isEmpty())
-                throw std::runtime_error("FSM '" + self->name() +  "': An empty event has been sent to state " + self->currentState());
-            
-            *event_return = std::move(self->_event);
+        void await_resume() {
+            // if (self->_event.isEmpty())
+            //     throw std::runtime_error("FSM '" + self->name() +  "': An empty event has been sent to state " + self->currentState());
+            *event_return = std::move(self->m_event_for_next_resume);
         }
     };
 
-    friend struct Awaitable2;
+    friend struct EmitReceiveAwaitable;
 
-    Awaitable2 emitAndReceive2(Event& e) {
-        this->_event = std::move(e);
-        return Awaitable2{this, &e};
+    EmitReceiveAwaitable EmitAndReceive(Event_t& e) {
+        if (e.Empty()) {
+            throw std::runtime_error(std::format(
+                "FSM '{}' got invalid empty event",
+                this->Name()
+            ));
+        }
+
+        m_event_for_next_resume = std::move(e);
+        return EmitReceiveAwaitable{this, &e};
     }
 
-    struct InitialAwaitable
-    {
+    // A simplified form of EmitAndReceive that only waits for an event,
+    // and does not have the emission logic needed for transmission
+    struct ReceiveAwaitable {
         FSM* self;
-        constexpr bool await_ready() {return false;}
-        void await_suspend(StateHandle) {}
-        Event await_resume()
-        {
-            self->_bIsActive.store(true, std::memory_order_relaxed);
-            if (self->_event.isEmpty())
-                throw std::runtime_error("FSM '" + self->name() + "': An empty event has been sent to state " + self->currentState());
-            return std::move(self->_event);
+
+        bool await_ready() {
+            const Event_t& pending_event = self->m_event_for_next_resume;
+            return !pending_event.Empty();
+        }
+
+        void await_suspend(StateHandle) {
+            // If there is no event ready to be read, suspend the entire FSM
+            self->m_is_fsm_active.store(false, std::memory_order_relaxed);
+        }
+
+        Event_t await_resume() {
+            self->m_is_fsm_active.store(true, std::memory_order_relaxed);
+            return std::move(self->m_event_for_next_resume);
         }
     };
 
-    friend struct InitialAwaitable;
+    friend struct ReceiveAwaitable;
 
     // Returns an awaitable which gives the next event sent to the awaiting state coroutine.
-    InitialAwaitable getEvent()
-    {
-        return InitialAwaitable{this};
+    ReceiveAwaitable ReceiveEvent() {
+        return ReceiveAwaitable{this};
     }
 
     // Adds a state to the state machine without associating any events with it.
     // Returns the index of the vector to which the state was stored.
-    std::size_t addState(State&& state)
-    {
-        if (hasState(state.Name()))
-            throw std::runtime_error(std::format(
-                "A state with name '{}' already exists in FSM {}",
-                state.Name(),
-                _name
-            ));
+    FSM& AddState(State_t&& state) {
+        // if (hasState(state.Name()))
+        //     throw std::runtime_error(std::format(
+        //         "A state with name '{}' already exists in FSM {}",
+        //         state.Name(),
+        //         _name
+        //     ));
 
         if (state.handle())
-            _vecStates.push_back(std::move(state));
+            m_states.push_back(std::move(state));
         else
             throw std::runtime_error("Attempt to add an invalid state to FSM " + _name);
-        return _vecStates.size() - 1;
+        return m_states.size() - 1;
     }
 
     // Alias for the above.
@@ -727,15 +689,15 @@ public:
     }
 
     // Returns reference to the state object at the given index.
-    const State& getStateAt(std::size_t index) { return _vecStates.at(index); }
+    const State& getStateAt(std::size_t index) { return m_states.at(index); }
 
     // Returns the number of states in the FSM.
-    std::size_t numberOfStates() const { return _vecStates.size(); }
+    std::size_t numberOfStates() const { return m_states.size(); }
 
     // Get the states going from the initial suspension.
     FSM& start()
     {
-        for (auto& state : _vecStates) {
+        for (auto& state : m_states) {
             // Resume only if the coroutine is still suspended in initial_suspend.
             if (!state.isStarted())
                 state.handle().resume();
@@ -748,6 +710,7 @@ public:
     // is either the state where the FSM left off when it was
     // suspended last time or the state which has been explicitly
     // set by calling setState().
+    // TODO: add exception to check if it's currently running
     FSM& sendEvent(Event* pEvent)
     {
         if (!_state.promise().bIsStarted)
@@ -770,34 +733,19 @@ public:
      const State& findState(SV name) const
      {
         // Find the name from the list of states
-        for (const State& state : _vecStates)
+        for (const State& state : m_states)
             if (state.Name() == name)
                 return state;
         throw std::runtime_error("FSM('" + _name + "'): findState() did not find the requested name '" + std::string(name) + "'");
      }
 
-    // Finds the state vector index where the state with the given name lives. Throws if not found.
-     std::size_t findIndex(SV name) const
-     {
-         for (std::size_t i = 0; i < _vecStates.size(); ++i)
-             if (_vecStates[i].Name() == name)
-                 return i;
-        throw std::runtime_error("FSM('" + _name + "'): findIndex() did not find the requested name '" + std::string(name) + "'");
-     }
-
-     // Returns true if the given state is registered in the fsm.
-     bool hasState(SV name) const
-     {
-        // Find the name from the list of states
-        for (const State& state : this->_vecStates)
-            if (state.Name() == name)
-                return true;
-         return false;
-     }
+    bool HasState(StateId id) const {
+        return std::ranges::find(m_states, id, &State_t::Id) != m_states.end();
+    }
 
     // Returns true if the FSM is running and false if all states
     // are suspended and waiting for an event.
-    const std::atomic<bool>& isActive() const { return _bIsActive; }
+    const std::atomic<bool>& isActive() const { return m_is_fsm_active; }
 
     // Callback for debugging and writing log. It is called when the state of
     // the fsm whose name is in the first argument is about
@@ -807,23 +755,23 @@ public:
 
 private:
     std::string _name;       // Name of the FSM (for information only)
-    Event _event;       // The latest event
+    // Event _event;       // The latest event
     StateHandle _state = nullptr; // Current state (for information only)
 
-    // Find the handle based on the name. Returns nullptr if not found.
-    StateHandle findHandle(SV name) const
-    {
-    // Find the name from the list of states
-        for (const State& state : _vecStates)
-            if (state.Name() == name)
-                return state.handle();
-        return nullptr;
+    State_t* FindState(StateId id) {
+        auto it = std::ranges::find(m_states, id, &State_t::Id);
+        return it != m_states.end() ? &*it : nullptr;
+    }
+
+    const State* FindState(StateId id) const {
+        auto it = std::ranges::find(m_states, id, &State_t::Id);
+        return it != m_states.end() ? &*it : nullptr;
     }
 
     std::optional<StateHandle> DoPotentialTransition(const Event& onEvent) {
         TransitionTarget to;
 
-        if (auto it = _mapTransitionTable.find({_state, onEvent.name()}); it != _mapTransitionTable.end())
+        if (auto it = m_transition_table.find({_state, onEvent.name()}); it != m_transition_table.end())
             to = it->second;
         else
             // No coded state transition, return empty handle to signify this
@@ -839,7 +787,7 @@ private:
             if (logger)
                 logger(name(), fromState.promise().name, onEvent, to.state.promise().name);
 
-            _bIsActive.store(true, std::memory_order_relaxed);
+            m_is_fsm_active.store(true, std::memory_order_relaxed);
             return to.state;
         } else { // The target state lives in another FSM.
             // Note: self FSM will suspend and self->state remains in the state where
@@ -853,28 +801,30 @@ private:
                 logger(name()+"-->"+to.fsm->name(), fromState.promise().name, to.fsm->_event, to.state.promise().name);
 
             // Self is suspended and to.fsm is resumed.
-            _bIsActive.store(false, std::memory_order_relaxed);
-            to.fsm->_bIsActive.store(true, std::memory_order_relaxed);
+            m_is_fsm_active.store(false, std::memory_order_relaxed);
+            to.fsm->m_is_fsm_active.store(true, std::memory_order_relaxed);
 
             return to.state;
         }
     }
 
-    // Hashes a coroutine handle
-    struct HandleHash
-    {
-        std::size_t operator() (const StateHandle& h) const noexcept {
-            return std::hash<void*>()(h.address());
-        }
+    // The 'from' and 'event' of a transition
+    struct PartialTransition {
+        StateHandle from;
+        EventId event;
     };
 
-    // Hash {state, event} - pair
-    struct PairHash
+    struct PartialTransitionHash
     {
-        std::size_t operator() (const std::pair<StateHandle, SV>& p) const noexcept {
-            // Note: you could possibly do better than xor. See
-            // https://stackoverflow.com/questions/5889238/why-is-xor-the-default-way-to-combine-hashes
-            return HandleHash{}(p.first) ^ std::hash<SV>()(p.second);
+        std::size_t operator() (const PartialTransition& t) const noexcept {
+            std::size_t lhs = std::hash<void*>()(t.address());
+
+            // Activate ADL
+            using std::hash;
+            std::size_t rhs = hash<EventId>()(t.event);
+
+            // Combine hashes
+            return lhs ^ (rhs + 0x517cc1b727220a95 + (lhs << 6) + (lhs >> 2));
         }
     };
 
@@ -887,13 +837,16 @@ private:
 
     // Transition table in format {from-state, event} -> to-state
     // That is, an event sent from from-state will be routed to to-state.
-    std::unordered_map<std::pair<StateHandle,SV>, TransitionTarget, PairHash> _mapTransitionTable;
+    std::unordered_map<PartialTransition, TransitionTarget, PartialTransitionHash> m_transition_table;
 
     // All coroutines which represent the states in the state machine
-    std::vector<State> _vecStates;
+    std::vector<State> m_states;
 
     // True if the FSM is running, false if suspended.
-    std::atomic<bool> _bIsActive = false;
+    std::atomic<bool> m_is_fsm_active = false;
+
+    // Temporary event storage to be captured by Awaitable on resume
+    Event_t m_event_for_next_resume{};
 }; // FSM
 
 } // namespace dxfsm
