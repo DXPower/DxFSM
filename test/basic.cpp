@@ -1,43 +1,62 @@
 #include <dxfsm/dxfsm.hpp>
 
 #include <algorithm>
+#include <array>
 #include <ranges>
 #include <iostream>
 #include <catch2/catch_test_macros.hpp>
 
 using namespace dxfsm;
 
+enum class EventId {
+    Start,
+    ProcessValue,
+    Finish
+};
+
+enum class StateId {
+    Start,
+    Processing,
+    Finish
+};
+
+template<>
+struct std::hash<EventId> {
+    std::size_t operator()(const EventId& id) {
+        using U = std::underlying_type_t<EventId>;
+        return std::hash<U>{}(static_cast<U>(id));
+    }
+};
+
 struct CollatzFsm {
-    enum class EventId {
-        Start,
-        ProcessValue,
-        Finish
-    };
-
     using Event_t = Event<EventId>;
+    using State_t = State<StateId>;
+    using FSM_t = FSM<StateId, EventId>;
 
-    FSM fsm{"CollatzFsm"};
+    FSM_t fsm{"CollatzFsm"};
     
     std::vector<int> sequence{};
     std::vector<EventId> event_ids{};
 
     CollatzFsm() {
-        fsm << StateStart(fsm).Name("StateStart")
-            << StateProcess(fsm).Name("StateProcess")
-            << StateFinish(fsm).Name("StateFinish");
+        fsm
+            .AddState(StateStart(fsm, StateId::Start).Name("Start"))
+            .AddState(StateProcess(fsm, StateId::Processing).Name("Processing"))
+            .AddState(StateFinish(fsm, StateId::Finish).Name("Finish"));
 
-        fsm << transition("StateStart", "ProcessValue", "StateProcess")
-            << transition("StateProcess", "ProcessValue", "StateProcess")
-            << transition("StateProcess", "Finish", "StateFinish")
-            << transition("StateFinish", "Start", "StateStart");
+        fsm
+            .AddTransition(StateId::Start, EventId::ProcessValue, StateId::Processing)
+            .AddTransition(StateId::Processing, EventId::ProcessValue, StateId::Processing)
+            .AddTransition(StateId::Processing, EventId::Finish, StateId::Finish)
+            .AddTransition(StateId::Finish, EventId::Start, StateId::Start);
 
-        fsm.setState("StateStart").start();
+        fsm.SetCurrentState(StateId::Start).Start();
     }
 
-    State StateStart(FSM& fsm) {
+    State_t StateStart(FSM_t& fsm, StateId id) {
         std::cout << "Hello" << std::endl;
 
-        Event event = co_await fsm.getEvent();
+        Event event = co_await fsm.ReceiveEvent();
 
         while (true) {
             sequence.clear();
@@ -48,12 +67,12 @@ struct CollatzFsm {
             auto start_value = event.Get<int>();
 
             event.Store(EventId::ProcessValue, start_value);
-            co_await fsm.emitAndReceive2(event);
+            co_await fsm.EmitAndReceive(event);
         }
     }
 
-    State StateProcess(FSM& fsm) {
-        Event event = co_await fsm.getEvent();
+    State_t StateProcess(FSM_t& fsm, StateId id) {
+        Event event = co_await fsm.ReceiveEvent();
 
         while (true) {
             event_ids.push_back(event.GetId());
@@ -74,26 +93,25 @@ struct CollatzFsm {
                 }
             }
 
-            event = co_await fsm.emitAndReceive(&event);
+            co_await fsm.EmitAndReceive(event);
         }
     }
 
-    State StateFinish(FSM& fsm) {
-        Event event = co_await fsm.getEvent();
+    State_t StateFinish(FSM_t& fsm, StateId id) {
+        Event_t event{};
 
         while (true) {
+            event = co_await fsm.ReceiveEvent();
             event_ids.push_back(event.GetId());
-
-            event = co_await fsm.getEvent();
         }
     }
 };
 
-TEST_CASE( "Collatz FSM", "[basic][events][names]" ) {
+TEST_CASE("Collatz FSM", "[basic][events][names]") {
     CollatzFsm collatz{};
 
-    CollatzFsm::Event_t event(CollatzFsm::EventId::Start, 15);
-    collatz.fsm.sendEvent(&event);
+    CollatzFsm::Event_t event(EventId::Start, 15);
+    collatz.fsm.SendEvent(std::move(event));
 
     auto odds = collatz.sequence | std::views::filter([](int x) { return x % 2 != 0; });
     std::array odds_answers = {15,23,35,53,5,1};
