@@ -3,7 +3,7 @@ find_package(Catch2 REQUIRED)
 add_executable(dxfsm_tests)
 
 target_sources(dxfsm_tests PRIVATE
-    basic.cpp
+    collatz.cpp
 )
 
 target_link_libraries(dxfsm_tests PRIVATE dxfsm Catch2::Catch2WithMain)

@@ -83,7 +83,8 @@ struct CollatzFsm {
 
             if (cur_value == 1) {
                 // Replace the current event with a Finish event
-                event.Store(EventId::Finish);
+                // event.Store(EventId::Finish);
+                event = EventId::Finish;
             } else {
                 // Change the value in the current event in-place
                 if (cur_value % 2 == 0) {
