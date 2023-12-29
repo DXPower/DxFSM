@@ -102,9 +102,6 @@ namespace detail {
     };
 }
 
-static const std::string _sharedEmptyString{};
-
-
 // Generic reusable Event class.
 // An object of this type hold its identity in a string_view
 // and data in a byte buffer. Hence an event object can be reused
@@ -313,7 +310,7 @@ private:
 }; // Event
 
 template<typename Id>
-inline void swap(Event<Id>& lhs, Event<Id>& rhs) {
+void swap(Event<Id>& lhs, Event<Id>& rhs) {
     lhs.Swap(rhs);
 }
 
@@ -597,20 +594,58 @@ public:
     friend struct EmitReceiveAwaitable;
 
     EmitReceiveAwaitable EmitAndReceive(Event_t& e) {
-        if (e.Empty()) {
-            throw std::runtime_error(std::format(
-                "FSM '{}' got invalid empty event",
-                this->Name()
-            ));
-        }
+        // TODO: Should this check exist?
+        // if (e.Empty()) {
+        //     throw std::runtime_error(std::format(
+        //         "FSM '{}' got invalid empty event",
+        //         this->Name()
+        //     ));
+        // }
 
         m_event_for_next_resume = std::move(e);
         return EmitReceiveAwaitable{this, &e};
     }
 
     // A simplified form of EmitAndReceive that only waits for an event,
-    // and does not have the emission logic needed for transmission
+    // and does not have the emission logic needed for transmission.
+    // Uses an out parameter instead of a return.
     struct ReceiveAwaitable {
+        FSM* self;
+        Event_t* event_return;
+
+        bool await_ready() {
+            // const Event_t& pending_event = self->m_event_for_next_resume;
+            // return !pending_event.Empty();
+            return false;
+        }
+
+        void await_suspend(StateHandle) {
+            // If there is no event ready to be read, suspend the entire FSM
+            self->m_is_fsm_active.store(false, std::memory_order_relaxed);
+        }
+
+        void await_resume() {
+            self->m_is_fsm_active.store(true, std::memory_order_relaxed);
+            *event_return = std::move(self->m_event_for_next_resume);
+        }
+    };
+
+    friend struct ReceiveAwaitable;
+
+    // Returns an awaitable which gives the next event sent to the awaiting state coroutine.
+    // This takes an out parameter to allow for reuse of the Event object.
+    ReceiveAwaitable ReceiveEvent(Event_t& out) {
+        out.Clear(); // Clear the previous event
+        // Bring the storage for the Event into the FSM so it can be reused by the next
+        // call to SendEvent or EmitAndReceive
+        m_event_for_next_resume = std::move(out);
+        return ReceiveAwaitable{this, &out};
+    }
+    
+    // A simplified form of EmitAndReceive that only waits for an event,
+    // and does not have the emission logic needed for transmission.
+    // Uses a return instead of an out parameter.
+    struct InitialReceiveAwaitable {
         FSM* self;
 
         bool await_ready() {
@@ -629,11 +664,10 @@ public:
         }
     };
 
-    friend struct ReceiveAwaitable;
+    friend struct InitialReceiveAwaitable;
 
-    // Returns an awaitable which gives the next event sent to the awaiting state coroutine.
-    ReceiveAwaitable ReceiveEvent() {
-        return ReceiveAwaitable{this};
+    InitialReceiveAwaitable ReceiveInitialEvent() {
+        return InitialReceiveAwaitable{this};
     }
 
     // Adds a state to the state machine without associating any events with it.

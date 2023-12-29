@@ -58,9 +58,12 @@ struct CollatzFsm {
     State_t StateStart(FSM_t& fsm, StateId id) {
         std::cout << "Hello" << std::endl;
 
-        Event event = co_await fsm.ReceiveEvent();
+        // Specifically test using EmitAndReceive at beginning of loop
+        Event_t event{};
 
         while (true) {
+            co_await fsm.EmitAndReceive(event);
+
             sequence.clear();
             event_ids.clear();
 
@@ -69,12 +72,12 @@ struct CollatzFsm {
             auto start_value = event.Get<int>();
 
             event.Store(EventId::ProcessValue, start_value);
-            co_await fsm.EmitAndReceive(event);
         }
     }
 
     State_t StateProcess(FSM_t& fsm, StateId id) {
-        Event event = co_await fsm.ReceiveEvent();
+        // Specifically test ReceiveEvent at top then EmitAndReceive at end of loop
+        Event event = co_await fsm.ReceiveInitialEvent();
 
         while (true) {
             event_ids.push_back(event.GetId());
@@ -104,7 +107,8 @@ struct CollatzFsm {
         Event_t event{};
 
         while (true) {
-            event = co_await fsm.ReceiveEvent();
+            // Swallow previous event allocations (just to test ReceiveEvent)
+            co_await fsm.ReceiveEvent(event);
             event_ids.push_back(event.GetId());
         }
     }
