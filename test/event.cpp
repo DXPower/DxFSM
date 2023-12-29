@@ -121,6 +121,52 @@ namespace {
     };
 }
 
+TEST_CASE("Event move semantics", "[events]") {
+    int destroy_counters[2]{};
+    int expected_destroy_counters[2]{};
+
+    Event e1(EB, std::in_place_type<TestDataTicker>, 0x100DFACE, "Applesauce", &destroy_counters[0]);
+
+    SECTION("Move constructor") {
+        Event e2(std::move(e1));
+
+        CHECK(e1.Empty());
+        CHECK_FALSE(e1.HasData());
+        CHECK_THROWS(e1.Get<TestDataTicker>());
+        CHECK_THROWS(e1.GetId());
+
+        CHECK_FALSE(e2.Empty());
+        CHECK(e2.HasData());
+        CHECK(e2.Get<TestDataTicker>() == TestData(0x100DFACE, "Applesauce"));
+        CHECK(e2 == EB);
+
+        CHECK(destroy_counters[0] == 0);
+        
+        expected_destroy_counters[0] = 1;
+        expected_destroy_counters[1] = 0;
+    }
+
+    SECTION("Move assignment") {
+        Event e2(EC, std::in_place_type<TestDataTicker>, 0x2345BEAD, "Dolphins", &destroy_counters[1]);
+        e2 = std::move(e1);
+
+        CHECK_FALSE(e2.Empty());
+        CHECK(e2.HasData());
+        CHECK(e2.Get<TestDataTicker>() == TestData(0x100DFACE, "Applesauce"));
+        CHECK(e2 == EB);
+
+        CHECK(destroy_counters[0] == 0);
+        
+        expected_destroy_counters[0] = 1;
+        expected_destroy_counters[1] = 1;
+    }
+
+    e1.Clear();
+
+    CHECK(destroy_counters[0] == expected_destroy_counters[0]);
+    CHECK(destroy_counters[1] == expected_destroy_counters[1]);
+}
+
 TEST_CASE("Event storage", "[events]") {
     int destroy_counter{};
 
