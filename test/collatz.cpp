@@ -8,17 +8,19 @@
 
 using namespace dxfsm;
 
-enum class EventId {
-    Start,
-    ProcessValue,
-    Finish
-};
+namespace {
+    enum class EventId {
+        Start,
+        ProcessValue,
+        Finish
+    };
 
-enum class StateId {
-    Start,
-    Processing,
-    Finish
-};
+    enum class StateId {
+        Start,
+        Processing,
+        Finish
+    };
+}
 
 template<>
 struct std::hash<EventId> {
@@ -108,7 +110,7 @@ struct CollatzFsm {
     }
 };
 
-TEST_CASE("Collatz FSM", "[basic][events][names]") {
+TEST_CASE("Collatz FSM", "[basic][events]") {
     CollatzFsm collatz{};
 
     CollatzFsm::Event_t event(EventId::Start, 15);

@@ -25,25 +25,52 @@ namespace detail {
         template<typename T>
         struct DestroyingPtr {
             T* ptr{};
-
             DestroyingPtr(T* ptr) noexcept : ptr(ptr) { }
 
-            ~DestroyingPtr() requires std::is_trivially_destructible_v<T> = default;
-            
-            ~DestroyingPtr() noexcept(noexcept(ptr->~T()))
-            requires (not std::is_trivially_destructible_v<T>) 
-            { ptr->~T(); }
+            static_assert(std::is_trivially_destructible_v<T>);
+        };
+        
+        template<typename T>
+        requires (not std::is_trivially_destructible_v<T>)
+        struct DestroyingPtr<T> {
+            T* ptr{};
+
+            DestroyingPtr(T* ptr) noexcept : ptr(ptr) { }
+            ~DestroyingPtr() noexcept(noexcept(ptr->~T())) {
+                if (ptr != nullptr)
+                    ptr->~T();
+            }
+
+            DestroyingPtr(DestroyingPtr&& move) noexcept : ptr(std::exchange(move.ptr, nullptr)) { }
+            DestroyingPtr& operator=(DestroyingPtr&& move) noexcept {
+                std::swap(ptr, move.ptr);
+                return *this;
+            }
+
+            DestroyingPtr(const DestroyingPtr&) {
+                assert(false); // Should never be copied
+            }
+
+            DestroyingPtr& operator=(const DestroyingPtr&) {
+                assert(false); // Should never be copied
+            }
         };
     public:
         AnyPtr() = default;
         AnyPtr(std::nullptr_t) { }
 
         template<typename T>
-        AnyPtr(T* ptr) : m_underlying_any(DestroyingPtr(ptr)) { }
+        AnyPtr(T* ptr) : m_underlying_any(std::in_place_type<DestroyingPtr<T>>, ptr) { }
 
         // Moves
         AnyPtr(AnyPtr&& move) noexcept = default;
         AnyPtr& operator=(AnyPtr&& move) noexcept = default;
+
+        template<typename T>
+        AnyPtr& operator=(T* ptr) {
+            m_underlying_any.emplace<DestroyingPtr<T>>(ptr);
+            return *this;
+        }
 
         template<typename T>
         T* TryExtract() {
@@ -53,7 +80,7 @@ namespace detail {
 
         template<typename T>
         const T* TryExtract() const {
-            auto* any_ptr = std::any_cast<DestroyingPtr<T>*>(&m_underlying_any);
+            auto* any_ptr = std::any_cast<DestroyingPtr<T>>(&m_underlying_any);
             return any_ptr ? any_ptr->ptr : nullptr;
         }
 
@@ -204,13 +231,13 @@ struct Event {
     // Reinterprets the data buffer as an object of type T.
     template<class T>
     T& GetUnchecked() {
-        return std::launder(reinterpret_cast<T*>(_storage));
+        return *std::launder(reinterpret_cast<T*>(_storage));
     }
 
     // Reinterprets the data buffer as an object of type T.
     template<class T>
     const T& GetUnchecked() const {
-        return std::launder(reinterpret_cast<const T*>(_storage));
+        return *std::launder(reinterpret_cast<const T*>(_storage));
     }
 
     // Returns pointer to the data buffer
@@ -223,9 +250,9 @@ struct Event {
     }
 
     // Deletes all allocated data and resets the event to its default, empty state
-    void ReleaseStorage()
-    {
-        this->swap({});
+    void ReleaseStorage() {
+        Event dummy{};
+        this->Swap(dummy);
     }
 
     // Reserves space for event data. The existing data may be wiped out.
@@ -236,7 +263,7 @@ struct Event {
 
             _id.reset();
             _capacity = size;
-            delete [] _storage;
+            delete[] _storage;
             _storage = new std::byte[size];
         }
     }
@@ -246,15 +273,22 @@ struct Event {
     std::size_t Capacity() const { return _capacity; }
 
     // Returns true if the name of the event == other
-    bool operator==(Id id) const { return _id.has_value() && _id.value() == id; }
+    bool operator==(const Id& id) const { return _id.has_value() && _id.value() == id; }
 
     // Returns true if the event is empty (i.e. _id is not set)
     [[nodiscard]] bool Empty() const { return !_id.has_value(); }
 
     // Checks if the event has stored data associated with it
-    bool HasData() const { return _any_ptr.HasValue(); }
+    template<typename T = void>
+    bool HasData() const {
+        if constexpr (std::is_same_v<T, void>) {
+            return _any_ptr.HasValue();
+        } else {
+            return GetMaybe<T>() != nullptr;
+        }
+    }
 
-    Id GetId() const { return _id.value(); }
+    const Id& GetId() const { return _id.value(); }
 
     void Swap(Event& other) {
         std::swap(_id, other._id);
@@ -678,8 +712,8 @@ public:
 
     // Callback for debugging and writing log. It is called when the state of
     // the fsm whose name is in the first argument is about
-    // to change from 'fromState' to 'toState' because the fromState is sending
-    // event 'onEvent'.
+    // to change from 'from' to 'to' because the from is sending
+    // event 'event'.
     std::function<
         void(const FSM& fsm, 
              typename State_t::InfoView from,
