@@ -135,7 +135,10 @@ struct Event {
     }
 
     Event& operator=(Event&& other) noexcept {
-        this->Swap(other);
+        if (&other != this) {
+            this->Swap(other);
+        }
+
         return *this;
     }
 
@@ -568,20 +571,21 @@ public:
             // If a state emits an empty event all states will remain suspended.
             // Consequently, the FSM will stopped. It can be restarted by calling SendEvent()
             if (pending_event.Empty()) {
-                self->m_is_fsm_active.store(false, std::memory_order_relaxed);
+                self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
                 return std::noop_coroutine();
             }
 
-            std::optional<StateHandle> next_state = self->DoPotentialTransition();
+            std::optional<Transitioner> transition = self->GetTransition();
 
-            if (!next_state.has_value()) {
+            if (!transition.has_value()) {
                 throw std::runtime_error(std::format(
                     "FSM '{}' can't find transition from state '{}' for given event. Please fix the transition table",
                     self->Name(), fromState.promise().name
                 ));
             }
 
-            return *next_state;
+            transition->Apply(false);
+            return transition->next_state;
         }
 
         void await_resume() {
@@ -621,11 +625,11 @@ public:
 
         void await_suspend(StateHandle) {
             // If there is no event ready to be read, suspend the entire FSM
-            self->m_is_fsm_active.store(false, std::memory_order_relaxed);
+            self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
         }
 
         void await_resume() {
-            self->m_is_fsm_active.store(true, std::memory_order_relaxed);
+            self->m_is_fsm_active.store(true, std::memory_order::seq_cst);
             *event_return = std::move(self->m_event_for_next_resume);
         }
     };
@@ -655,11 +659,11 @@ public:
 
         void await_suspend(StateHandle) {
             // If there is no event ready to be read, suspend the entire FSM
-            self->m_is_fsm_active.store(false, std::memory_order_relaxed);
+            self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
         }
 
         [[nodiscard]] Event_t await_resume() {
-            self->m_is_fsm_active.store(true, std::memory_order_relaxed);
+            self->m_is_fsm_active.store(true, std::memory_order::seq_cst);
             return std::move(self->m_event_for_next_resume);
         }
     };
@@ -701,36 +705,51 @@ public:
         return *this;
     }
 
-    // Kick off the state machine by sending the event.
-    // It it sent to the state which
-    // is either the state where the FSM left off when it was
-    // suspended last time or the state which has been explicitly
-    // set by calling setState().
-    FSM& SendEvent(Event_t&& e) {
-        if (m_is_fsm_active) {
-            throw std::runtime_error(std::format("Attempt to send event to FSM '{}' while it is running", Name()));
-        }
-
+    // Kick off a suspended state machine by sending an event.
+    // If (current state, event id) is in the transition table,
+    // then it is sent to the next_state as defined by the transition.
+    // Else, it is sent to the current_state.
+    FSM& InsertEvent(Event_t&& e) {
         // Store the event in the FSM, which will get moved by the next Awaitable resumed
         m_event_for_next_resume = std::move(e);
 
         // Treat this event as one that could change the state
-        auto transition_state = DoPotentialTransition();
+        std::optional<Transitioner> potential_transition = GetTransition();
 
         // transition_state has_value() means that a transition was found and
         // transition_state is the coroutine to be resumed.
         // Else, no transition occured, send the event to the current state.
-        StateHandle to_resume = transition_state.has_value() ? *transition_state : _state;
+        Transitioner transition = potential_transition.has_value() 
+            ? *potential_transition 
+            : Transitioner{
+                .originating_fsm = this,
+                .target_fsm = this,
+                .from_state = _state,
+                .next_state = _state
+        };
 
-        if (!to_resume.promise().is_started) {
-            throw std::runtime_error(std::format(
-                "Attempt to send event to state '{}' (FSM '{}') before it has been started. Have you called fsm.Start() after adding it?",
-                to_resume.promise().name,
-                Name()
-            ));
+        // TODO: What do I actually need the is_started flag for?
+        // if (!transition..promise().is_started) {
+        //     m_is_fsm_active.store(false, std::memory_order::seq_cst);
+
+        //     throw std::runtime_error(std::format(
+        //         "Attempt to send event to state '{}' (FSM '{}') before it has been started. Have you called fsm.Start() after adding it?",
+        //         to_resume.promise().name,
+        //         Name()
+        //     ));
+        // }
+
+        // If an exception is thrown while the state is running, catch it to 
+        // always unset our running flag.
+        // TODO: do this in State promise's unhandled_exception
+        try {
+            transition.next_state.resume();
+        } catch (...) {
+            transition.target_fsm->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            throw;
         }
 
-        to_resume.resume();
+        transition.target_fsm->m_is_fsm_active.store(false, std::memory_order::seq_cst);
         return *this;
     }
 
@@ -770,7 +789,35 @@ private:
         return it != m_states.end() ? &*it : nullptr;
     }
 
-    std::optional<StateHandle> DoPotentialTransition() {
+    struct Transitioner {
+        FSM* originating_fsm{};
+        FSM* target_fsm{};
+        StateHandle from_state{};
+        StateHandle next_state{};
+
+        void Apply(bool always_set_started) {
+            // If switching FSMs, always check if the other is started
+            always_set_started |= originating_fsm != target_fsm;
+
+            if (always_set_started) {
+                bool is_started = false;
+                if (target_fsm->m_is_fsm_active.compare_exchange_strong(is_started, true, std::memory_order::seq_cst)) {
+                    throw std::runtime_error(std::format("Attempt to insert event into FSM '{}' while it is running", target_fsm->Name()));
+                }
+            }
+
+            if (originating_fsm == target_fsm) {
+                target_fsm->_state = next_state;
+            } else {
+                originating_fsm->_state = {};
+                target_fsm->m_event_for_next_resume = std::move(originating_fsm->m_event_for_next_resume);
+
+                originating_fsm->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            }
+        }
+    };
+
+    std::optional<Transitioner> GetTransition() noexcept {
         Event_t& pending_event = m_event_for_next_resume;
 
         TransitionTarget to;
@@ -786,31 +833,24 @@ private:
         // However, it may also be going to a state owned by another FSM.
         // The destination FSM is in TransitionTarget struct together with the state handle.
         if (to.fsm == this) {  // The target state lives in this FSM.
-            _state = to.state;
+            // TODO: readd logging
+            // if (logger)
+            //     logger(*this, from_state.promise().GetInfoView(), pending_event, to.state.promise().GetInfoView());
 
-            if (logger)
-                logger(*this, from_state.promise().GetInfoView(), pending_event, to.state.promise().GetInfoView());
-
-            m_is_fsm_active.store(true, std::memory_order_relaxed);
-            return to.state;
+            return Transitioner {
+                .originating_fsm = this,
+                .target_fsm = this,
+                .from_state = from_state,
+                .next_state = to.state
+            };
         } else { // The target state lives in another FSM.
-            // Note: self FSM will suspend and self->state remains in the state where
-            //       it left off when to.fsm took over.
-            to.fsm->_state = to.state; // to.fsm will resume.
-            // Move the event to the target FSM. The event of the target FSM should be empty.
-
-            if (logger)
-                logger(*this, from_state.promise().GetInfoView(), pending_event, to.state.promise().GetInfoView());
-
-            // TODO: convert to exception
-            assert(to.fsm->m_event_for_next_resume.Empty());
-            to.fsm->m_event_for_next_resume = std::move(pending_event);
-
             // Self is suspended and to.fsm is resumed.
-            m_is_fsm_active.store(false, std::memory_order_relaxed);
-            to.fsm->m_is_fsm_active.store(true, std::memory_order_relaxed);
-
-            return to.state;
+            return Transitioner{
+                .originating_fsm = this,
+                .target_fsm = to.fsm,
+                .from_state = from_state,
+                .next_state = to.state
+            };
         }
     }
 

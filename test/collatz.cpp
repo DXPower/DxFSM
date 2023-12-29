@@ -4,7 +4,9 @@
 #include <array>
 #include <ranges>
 #include <iostream>
+
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_templated.hpp>
 
 using namespace dxfsm;
 
@@ -19,6 +21,15 @@ namespace {
         Start,
         Processing,
         Finish
+    };
+
+    struct InvalidValue : std::runtime_error {
+        int value{};
+
+        InvalidValue(int value)
+            : std::runtime_error(std::format("Invalid value in Collatz sequence: {}", value)),
+              value(value)
+        { }
     };
 }
 
@@ -90,13 +101,15 @@ struct CollatzFsm {
                 // Replace the current event with a Finish event
                 // event.Store(EventId::Finish);
                 event = EventId::Finish;
-            } else {
+            } else if (cur_value > 1) {
                 // Change the value in the current event in-place
                 if (cur_value % 2 == 0) {
                     cur_value /= 2;
                 } else {
                     cur_value = 3 * cur_value + 1;
                 }
+            } else {
+                throw InvalidValue(cur_value);
             }
 
             co_await fsm.EmitAndReceive(event);
@@ -114,14 +127,50 @@ struct CollatzFsm {
     }
 };
 
-TEST_CASE("Collatz FSM", "[basic][events]") {
+struct InvalidValueMatcher : Catch::Matchers::MatcherGenericBase {
+    int expected{};
+
+    InvalidValueMatcher(int expected) : expected(expected) { }
+
+    bool match(const InvalidValue& given) const {
+        return given.value == expected;
+    }
+
+    std::string describe() const override {
+        return std::format("InvalidValue equals: {}", expected);
+    }
+};
+
+TEST_CASE("Collatz FSM", "[basic]") {
     CollatzFsm collatz{};
 
     CollatzFsm::Event_t event(EventId::Start, 15);
-    collatz.fsm.SendEvent(std::move(event));
+    collatz.fsm.InsertEvent(std::move(event));
 
     auto odds = collatz.sequence | std::views::filter([](int x) { return x % 2 != 0; });
     std::array odds_answers = {15,23,35,53,5,1};
 
     REQUIRE(std::ranges::equal(odds, odds_answers));
+}
+
+TEST_CASE("Collatz FSM Exceptions", "[advanced][exceptions]") {
+    CollatzFsm collatz{};
+
+    int invalid_value{};
+
+    SECTION("Zero") {
+        // Event(EventId::Start, 0)
+        invalid_value = 0;
+        // CHECK_THROWS_MATCHES(collatz.fsm.InsertEvent(), InvalidValue, InvalidValueMatcher(0));
+    }
+
+    SECTION("Negative") {
+        // CHECK_THROWS_MATCHES(collatz.fsm.InsertEvent(Event(EventId::Start, 0)));
+        invalid_value = -37;
+    }
+
+    Event e(EventId::Start, invalid_value);
+
+    CHECK_THROWS_MATCHES(collatz.fsm.InsertEvent(std::move(e)), InvalidValue, InvalidValueMatcher(invalid_value));
+    CHECK_FALSE(collatz.fsm.IsActive());
 }
