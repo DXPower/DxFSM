@@ -1,7 +1,6 @@
 #include <dxfsm/dxfsm.hpp>
 
 #include <algorithm>
-#include <array>
 #include <ranges>
 #include <iostream>
 
@@ -146,6 +145,8 @@ TEST_CASE("Collatz FSM", "[basic]") {
 
     CollatzFsm::Event_t event(EventId::Start, 15);
     collatz.fsm.InsertEvent(std::move(event));
+
+    CHECK_FALSE(collatz.fsm.IsActive());
 
     auto odds = collatz.sequence | std::views::filter([](int x) { return x % 2 != 0; });
     std::vector<int> odds_vec{};

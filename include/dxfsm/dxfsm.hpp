@@ -111,7 +111,8 @@ namespace detail {
 // for the data, it will be extended a bit like std::vector does.
 // The buffer never shrinks but can be reset to zero lenght like std::vector.
 template<typename Id>
-struct Event {
+class Event {
+public:
     using Id_t = Id;
 
     Event() noexcept = default;
@@ -291,6 +292,16 @@ struct Event {
 
     const Id& GetId() const { return _id.value(); }
 
+    template<typename NewId>
+    Event<NewId> TransferToIdType(NewId&& new_id) {
+        Event<NewId> target{};
+        target._id = std::forward<NewId>(new_id);
+        target._capacity = std::exchange(_capacity, 0);
+        target._storage = std::exchange(_storage, nullptr);
+        target._any_ptr = std::exchange(_any_ptr, nullptr);
+        _id = std::nullopt;
+    }
+
     void Swap(Event& other) {
         std::swap(_id, other._id);
         std::swap(_capacity, other._capacity);
@@ -311,6 +322,9 @@ private:
     std::byte* _storage{};
     
     detail::AnyPtr _any_ptr{};
+
+    template<typename T>
+    friend class Event;
 }; // Event
 
 template<typename Id>
@@ -439,6 +453,14 @@ private:
     bool m_is_abominable{};
 }; // State
 
+namespace detail {
+    struct DoneReporterBase {
+        virtual ~DoneReporterBase() = default;
+
+        virtual void ReportDone() = 0;
+    };
+}
+
 // Finite State Machine class
 template<typename StateId, typename EventId>
 class FSM {
@@ -504,9 +526,8 @@ public:
                 .from = from_handle,
                 .event = std::move(event)
             },
-            TransitionTarget{
-                .state = to_handle,
-                .fsm = this
+            LocalTransitionTarget{
+                .state = to_handle
             }
         );
 
@@ -579,7 +600,7 @@ public:
                 return std::noop_coroutine();
             }
 
-            std::optional<Transitioner> transition = self->GetTransition();
+            std::optional<TransitionResult> transition = self->PerformTransition();
 
             if (!transition.has_value()) {
                 throw std::runtime_error(std::format(
@@ -588,13 +609,14 @@ public:
                 ));
             }
 
-            transition->Apply(false);
-            return transition->next_state;
+            if (transition->IsRemote()) {
+                self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            }
+
+            return transition->state_to_resume;
         }
 
         void await_resume() {
-            // if (self->_event.isEmpty())
-            //     throw std::runtime_error("FSM '" + self->name() +  "': An empty event has been sent to state " + self->currentState());
             *event_return = std::move(self->m_event_for_next_resume);
         }
     };
@@ -699,31 +721,28 @@ public:
         m_event_for_next_resume = std::move(e);
 
         // Treat this event as one that could change the state
-        std::optional<Transitioner> potential_transition = GetTransition();
+        std::optional<TransitionResult> potential_transition = PerformTransition();
 
-        // transition_state has_value() means that a transition was found and
-        // transition_state is the coroutine to be resumed.
-        // Else, no transition occured, send the event to the current state.
-        Transitioner transition = potential_transition.has_value() 
-            ? *potential_transition 
-            : Transitioner{
-                .originating_fsm = this,
-                .target_fsm = this,
-                .from_state = _state,
-                .next_state = _state
-        };
+        // // potential_transition has_value() means that a transition was found and
+        // // potential_transition is the coroutine to be resumed.
+        // // Else, no transition occured, send the event to the current state.
+        std::coroutine_handle<> state_to_resume = potential_transition.has_value() ?
+            potential_transition->state_to_resume :
+            _state;
 
         // If an exception is thrown while the state is running, catch it to 
-        // always unset our running flag.
-        // TODO: do this in State promise's unhandled_exception
+        // always cleanup
         try {
-            transition.next_state.resume();
+            state_to_resume.resume();
         } catch (...) {
-            transition.target_fsm->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            if (potential_transition.has_value() && potential_transition->IsRemote()) {
+                potential_transition->remote_done_reporter->ReportDone();
+            } else {
+                m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            }
             throw;
         }
 
-        transition.target_fsm->m_is_fsm_active.store(false, std::memory_order::seq_cst);
         return *this;
     }
 
@@ -775,69 +794,103 @@ private:
         return it != m_states.end() ? &*it : nullptr;
     }
 
-    struct Transitioner {
-        FSM* originating_fsm{};
-        FSM* target_fsm{};
-        StateHandle from_state{};
-        StateHandle next_state{};
+    void TrySetActive() {
+        bool is_started = false;
+        if (m_is_fsm_active.compare_exchange_strong(is_started, true, std::memory_order::seq_cst)) {
+            throw std::runtime_error(std::format("Attempt to insert event into FSM '{}' while it is running", Name()));
+        }
+    }
 
-        void Apply(bool always_set_started) {
-            // If switching FSMs, always check if the other is started
-            always_set_started |= originating_fsm != target_fsm;
+    struct RemoteDoneReporter final : detail::DoneReporterBase {
+        FSM* self{};
 
-            if (always_set_started) {
-                bool is_started = false;
-                if (target_fsm->m_is_fsm_active.compare_exchange_strong(is_started, true, std::memory_order::seq_cst)) {
-                    throw std::runtime_error(std::format("Attempt to insert event into FSM '{}' while it is running", target_fsm->Name()));
-                }
-            }
-
-            if (originating_fsm == target_fsm) {
-                target_fsm->_state = next_state;
-            } else {
-                originating_fsm->_state = {};
-                target_fsm->m_event_for_next_resume = std::move(originating_fsm->m_event_for_next_resume);
-
-                originating_fsm->m_is_fsm_active.store(false, std::memory_order::seq_cst);
-            }
+        void ReportDone() override {
+            self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
         }
     };
 
-    std::optional<Transitioner> GetTransition() noexcept {
-        Event_t& pending_event = m_event_for_next_resume;
+    struct LocalTransitionTarget {
+        StateHandle state{};
+    };
 
-        TransitionTarget to;
+    struct RemoteTransitionTargetBase {
+        virtual ~RemoteTransitionTargetBase() = default;
+
+        virtual std::coroutine_handle<> TryTransitionOnRemote(FSM& originating_fsm) const = 0;
+        virtual auto MakeExceptionReporter() const -> std::unique_ptr<detail::DoneReporterBase> = 0;
+    };
+
+    // D... = Destination
+    template<typename DStateId, typename DEventId>
+    struct RemoteTransitionTarget final : RemoteTransitionTargetBase {
+        using DFSM_t = FSM<DStateId, DEventId>;
+
+        DFSM_t* target_fsm{};
+        typename DFSM_t::StateHandle target_state_handle{};
+        DEventId translated_event_id;
+
+        std::coroutine_handle<> TryTransitionOnRemote(FSM& originating_fsm) const override {
+            target_fsm->TrySetActive();
+            
+            // Translate the event to the EventId type of the target FSM,
+            // then store it into the target FSM
+            auto& originating_event = originating_fsm.m_event_for_next_resume;
+            auto& target_event = target_fsm->m_event_for_next_resume;
+
+            target_event = originating_event.TransferToIdType(std::move(translated_event_id));
+
+            originating_fsm._state = nullptr;
+            target_fsm->_state = target_state_handle;
+
+            originating_fsm.m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            return target_state_handle;
+        }
+
+        auto MakeExceptionReporter() const -> std::unique_ptr<detail::DoneReporterBase> override {
+            return new typename DFSM_t::RemoteExceptionReporter{target_fsm};
+        }
+    };
+
+    using RemoteTransitionTargetPtr = std::unique_ptr<RemoteTransitionTargetBase>;
+    using TransitionTarget = std::variant<LocalTransitionTarget, RemoteTransitionTargetPtr>;
+
+    struct TransitionResult {
+        std::coroutine_handle<> state_to_resume{};
+        std::unique_ptr<detail::DoneReporterBase> remote_done_reporter{};
+
+        bool IsRemote() const {
+            return remote_done_reporter != nullptr;
+        }
+    };
+
+    std::optional<TransitionResult> PerformTransition() noexcept {
+        const Event_t& pending_event = m_event_for_next_resume;
+        const TransitionTarget* transition;
 
         if (auto it = m_transition_table.find({_state, pending_event.GetId()}); it != m_transition_table.end())
-            to = it->second;
+            transition = &it->second;
         else
-            // No coded state transition, return empty handle to signify this
-            return std::nullopt;
+            return std::nullopt; // No coded state transition, return empty handle to signify this
 
-        auto from_state = _state;
-        // Typically the event is being sent to a state owned by this FSM (i.e. self).
-        // However, it may also be going to a state owned by another FSM.
-        // The destination FSM is in TransitionTarget struct together with the state handle.
-        if (to.fsm == this) {  // The target state lives in this FSM.
-            // TODO: readd logging
-            // if (logger)
-            //     logger(*this, from_state.promise().GetInfoView(), pending_event, to.state.promise().GetInfoView());
+        return std::visit([this]<typename T>(const T& o) -> TransitionResult {
+            if constexpr (std::is_same_v<T, LocalTransitionTarget>) {
+                const LocalTransitionTarget& local = o;
+                this->_state = local.state;
 
-            return Transitioner {
-                .originating_fsm = this,
-                .target_fsm = this,
-                .from_state = from_state,
-                .next_state = to.state
-            };
-        } else { // The target state lives in another FSM.
-            // Self is suspended and to.fsm is resumed.
-            return Transitioner{
-                .originating_fsm = this,
-                .target_fsm = to.fsm,
-                .from_state = from_state,
-                .next_state = to.state
-            };
-        }
+                return {
+                    .state_to_resume = this->_state,
+                    .remote_done_reporter = nullptr
+                };
+            } else if constexpr(std::is_same_v<T, RemoteTransitionTargetPtr>) {
+                const RemoteTransitionTargetBase& remote = *o;
+                auto remote_handle = remote.TryTransitionOnRemote(*this);
+
+                return {
+                    .state_to_resume = remote_handle,
+                    .remote_done_reporter = remote.MakeExceptionReporter()
+                };
+            }
+        }, *transition);
     }
 
     // The 'from' and 'event' of a transition
@@ -862,12 +915,6 @@ private:
         }
     };
 
-    // Target state of a transition (i.e. go to the 'state' which belongs in 'fsm')
-    struct TransitionTarget
-    {
-        StateHandle state = nullptr;
-        FSM* fsm = nullptr;
-    };
 
     // Transition table in format {from-state, event} -> to-state
     // That is, an event sent from from-state will be routed to to-state.
