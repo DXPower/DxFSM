@@ -7,6 +7,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_templated.hpp>
+#include <catch2/matchers/catch_matchers_vector.hpp>
 
 using namespace dxfsm;
 
@@ -99,7 +100,6 @@ struct CollatzFsm {
 
             if (cur_value == 1) {
                 // Replace the current event with a Finish event
-                // event.Store(EventId::Finish);
                 event = EventId::Finish;
             } else if (cur_value > 1) {
                 // Change the value in the current event in-place
@@ -148,9 +148,12 @@ TEST_CASE("Collatz FSM", "[basic]") {
     collatz.fsm.InsertEvent(std::move(event));
 
     auto odds = collatz.sequence | std::views::filter([](int x) { return x % 2 != 0; });
-    std::array odds_answers = {15,23,35,53,5,1};
+    std::vector<int> odds_vec{};
+    std::ranges::copy(odds, std::back_inserter(odds_vec));
 
-    REQUIRE(std::ranges::equal(odds, odds_answers));
+    std::vector odds_answers = {15,23,35,53,5,1};
+
+    CHECK_THAT(odds_vec, Catch::Matchers::Equals(odds_answers));
 }
 
 TEST_CASE("Collatz FSM Exceptions", "[advanced][exceptions]") {
@@ -159,13 +162,10 @@ TEST_CASE("Collatz FSM Exceptions", "[advanced][exceptions]") {
     int invalid_value{};
 
     SECTION("Zero") {
-        // Event(EventId::Start, 0)
         invalid_value = 0;
-        // CHECK_THROWS_MATCHES(collatz.fsm.InsertEvent(), InvalidValue, InvalidValueMatcher(0));
     }
 
     SECTION("Negative") {
-        // CHECK_THROWS_MATCHES(collatz.fsm.InsertEvent(Event(EventId::Start, 0)));
         invalid_value = -37;
     }
 
@@ -173,4 +173,16 @@ TEST_CASE("Collatz FSM Exceptions", "[advanced][exceptions]") {
 
     CHECK_THROWS_MATCHES(collatz.fsm.InsertEvent(std::move(e)), InvalidValue, InvalidValueMatcher(invalid_value));
     CHECK_FALSE(collatz.fsm.IsActive());
+
+    std::vector<const CollatzFsm::State_t*> failed_states{};
+    std::ranges::copy(collatz.fsm.GetAbominableStates() | std::views::transform([](const auto& s) {
+        return &s;
+    }), std::back_inserter(failed_states));
+
+    REQUIRE(failed_states.size() == 1);
+    CHECK(failed_states[0]->Id() == StateId::Processing);
+    CHECK(failed_states[0]->IsAbominable());
+
+    collatz.fsm.RemoveAbominableStates();
+    CHECK(std::ranges::distance(collatz.fsm.GetAbominableStates()) == 0);
 }

@@ -16,6 +16,7 @@
 #include <format>
 #include <algorithm>
 #include <variant>
+#include <ranges>
 
 namespace dxfsm {
 namespace detail {
@@ -323,11 +324,6 @@ class FSM;
 // Return type of coroutines which represent states.
 template<typename StateId>
 struct State {
-    struct InfoView {
-        StateId id;
-        std::string_view name;
-    };
-
     struct promise_type {
         // Awaitable returned when the coroutine is first constructed
         struct InitialAwaitable {
@@ -348,24 +344,21 @@ struct State {
         InitialAwaitable initial_suspend() noexcept { return InitialAwaitable{this}; }
         constexpr std::suspend_always final_suspend() noexcept { return {}; }
         State get_return_object() noexcept { return State(this); };
-        void unhandled_exception() { throw; }
+        void unhandled_exception() { 
+            self->m_is_abominable = true;
+            self->m_coro_handle = nullptr;
+            throw;
+        }
         void return_void() {
             // State coroutines must never return.
             throw std::runtime_error("State coroutine is not allowed to co_return.");
         }
 
-        InfoView GetInfoView() const {
-            return InfoView{
-                .id = id,
-                .name = name
-            };
-        }
-
+        State* self;
         StateId id;
-        std::string name;
 
         // Only false before fsm.Start() is called after this state has been added
-        bool is_started = false;
+        bool is_started = false; // TODO: Is this really needed?
     };
 
     using handle_type = std::coroutine_handle<promise_type>;
@@ -377,20 +370,20 @@ struct State {
     operator handle_type() const noexcept { return m_coro_handle; }
 
     StateId Id() const {
-        if (m_coro_handle.address() == nullptr) {
+        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
             throw std::runtime_error("Attempt to get the ID of a state not associated with a coroutine");
         }
 
-        return m_coro_handle.promise().id;
+        return m_id;
     }
 
     // Sets human-readable name for the state.
     State& Name(std::string state_name) & {
-        if (m_coro_handle.address() == nullptr) {
+        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
             throw std::runtime_error("Attempt to set the name of State not associated with a coroutine");
         }
 
-        m_coro_handle.promise().name = std::move(state_name);
+        m_name = std::move(state_name);
         return *this;
     }
 
@@ -401,11 +394,11 @@ struct State {
 
     // Gets the human-readable name for the state.
     std::string_view Name() const {
-        if (m_coro_handle.address() == nullptr) {
+        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
             throw std::runtime_error("Attempt to get the name of a State not associated with a coroutine");
         }
 
-        return m_coro_handle.promise().name;
+        return m_name;
     }
 
     // False if the state is still waiting in initial_suspend.
@@ -414,11 +407,28 @@ struct State {
         return m_coro_handle.promise().is_started;
     }
 
+    // Abominable means that this state was killed due to an exception,
+    // and should be removed or readded by the user.
+    bool IsAbominable() const {
+        return m_is_abominable;
+    }
+
     // Move constructors.
-    State(State&& other) noexcept : m_coro_handle(std::exchange(other.m_coro_handle, nullptr)) {}
+    State(State&& other) noexcept 
+        : m_coro_handle(std::exchange(other.m_coro_handle, nullptr)),
+          m_id(std::exchange(other.m_id, {})),
+          m_name(std::exchange(other.m_name, {})),
+          m_is_abominable(std::exchange(other.m_is_abominable, false)) 
+    {
+        m_coro_handle.promise().self = this;
+    }
 
     State& operator=(State&& other) noexcept {
         m_coro_handle = std::exchange(other.m_coro_handle, nullptr);
+        m_id = std::exchange(other.m_id, {});
+        m_name = std::exchange(other.m_name, {});
+        m_is_abominable = std::exchange(other.m_is_abominable, false);
+        m_coro_handle.promise().self = this;
         return *this;
     }
 
@@ -431,9 +441,19 @@ private:
     State(const State&) = delete;
     State& operator=(const State&) = delete;
 
-    explicit State(promise_type *p) noexcept : m_coro_handle(handle_type::from_promise(*p)) {}
+    explicit State(promise_type *p) noexcept 
+        : m_coro_handle(handle_type::from_promise(*p)),
+          m_id(p->id)
+    {
+        p->self = this;
+    }
 
-    handle_type m_coro_handle;
+    handle_type m_coro_handle{};
+    // Need a copy of the ID here in case the coroutine throws an exception, as the promise
+    // object gets destroyed. This keeps the State object queryable for its identifying information.
+    StateId m_id{};
+    std::string m_name{};
+    bool m_is_abominable{};
 }; // State
 
 // Finite State Machine class
@@ -462,12 +482,13 @@ public:
     FSM& Name(std::string name) { _name = std::move(name); }
 
     // Returns the name of the target state of the latest transition.
-    auto GetCurrentState() const -> std::optional<typename State_t::InfoView> {
+    auto GetCurrentState() const -> const State_t& {
         if (!_state) {
             return std::nullopt;
         }
         
-        return _state.promise().GetInfoView();
+        // TODO: Rework how this information is stored
+        return FindState(_state.promise().id);
     }
 
     FSM& SetCurrentState(StateId id) {
@@ -580,7 +601,7 @@ public:
             if (!transition.has_value()) {
                 throw std::runtime_error(std::format(
                     "FSM '{}' can't find transition from state '{}' for given event. Please fix the transition table",
-                    self->Name(), fromState.promise().name
+                    self->Name(), self->FindState(fromState.promise().id)->Name()
                 ));
             }
 
@@ -757,6 +778,18 @@ public:
         return std::ranges::find(m_states, id, &State_t::Id) != m_states.end();
     }
 
+    auto GetAbominableStates() const {
+        return m_states | std::views::filter([](const State_t& s) {
+            return s.IsAbominable();
+        });
+    }
+
+    void RemoveAbominableStates() {
+        std::erase_if(m_states, [](const State_t& s) {
+            return s.IsAbominable();
+        });
+    }
+
     // Returns true if the FSM is running and false if all states
     // are suspended and waiting for an event.
     bool IsActive() const { return m_is_fsm_active; }
@@ -769,9 +802,9 @@ public:
     // event 'event'.
     std::function<
         void(const FSM& fsm, 
-             typename State_t::InfoView from,
+             const State_t& from,
              const Event_t& event,
-             typename State_t::InfoView to
+             const State_t& to
         )
     > logger;
 
