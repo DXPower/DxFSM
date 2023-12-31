@@ -325,14 +325,6 @@ class FSM;
 template<typename StateId>
 struct State {
     struct promise_type {
-        // Awaitable returned when the coroutine is first constructed
-        struct InitialAwaitable {
-            promise_type* self = nullptr;
-            constexpr bool await_ready() {return false;}
-            void await_suspend(std::coroutine_handle<promise_type>) {}
-            void await_resume() { self->is_started = true; } // The state was resumed from initial_suspend
-        };
-
         promise_type() = delete; // State must take FSM& and Id parameters
 
         // Define both member and non-member functions
@@ -341,7 +333,7 @@ struct State {
         template<typename Self, typename EventId> 
         promise_type(Self&&, FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id) : id(id) { }
 
-        InitialAwaitable initial_suspend() noexcept { return InitialAwaitable{this}; }
+        std::suspend_never initial_suspend() noexcept { return {}; }
         constexpr std::suspend_always final_suspend() noexcept { return {}; }
         State get_return_object() noexcept { return State(this); };
         void unhandled_exception() { 
@@ -356,9 +348,6 @@ struct State {
 
         State* self;
         StateId id;
-
-        // Only false before fsm.Start() is called after this state has been added
-        bool is_started = false; // TODO: Is this really needed?
     };
 
     using handle_type = std::coroutine_handle<promise_type>;
@@ -399,12 +388,6 @@ struct State {
         }
 
         return m_name;
-    }
-
-    // False if the state is still waiting in initial_suspend.
-    // True if the initial await has been resumed, typically by calling dxfsm::start())
-    bool IsStarted() const {
-        return m_coro_handle.promise().is_started;
     }
 
     // Abominable means that this state was killed due to an exception,
@@ -619,14 +602,6 @@ public:
     friend struct EmitReceiveAwaitable;
 
     EmitReceiveAwaitable EmitAndReceive(Event_t& e) {
-        // TODO: Should this check exist?
-        // if (e.Empty()) {
-        //     throw std::runtime_error(std::format(
-        //         "FSM '{}' got invalid empty event",
-        //         this->Name()
-        //     ));
-        // }
-
         m_event_for_next_resume = std::move(e);
         return EmitReceiveAwaitable{this, &e};
     }
@@ -715,17 +690,6 @@ public:
     }
     std::size_t NumStates() const { return m_states.size(); }
 
-    // Resumes all newly added states since the previous call to Start
-    FSM& Start() {
-        for (auto& state : m_states) {
-            // Resume only if the coroutine is still suspended in initial_suspend.
-            if (!state.IsStarted())
-                state.handle().resume();
-        }
-
-        return *this;
-    }
-
     // Kick off a suspended state machine by sending an event.
     // If (current state, event id) is in the transition table,
     // then it is sent to the next_state as defined by the transition.
@@ -748,17 +712,6 @@ public:
                 .from_state = _state,
                 .next_state = _state
         };
-
-        // TODO: What do I actually need the is_started flag for?
-        // if (!transition..promise().is_started) {
-        //     m_is_fsm_active.store(false, std::memory_order::seq_cst);
-
-        //     throw std::runtime_error(std::format(
-        //         "Attempt to send event to state '{}' (FSM '{}') before it has been started. Have you called fsm.Start() after adding it?",
-        //         to_resume.promise().name,
-        //         Name()
-        //     ));
-        // }
 
         // If an exception is thrown while the state is running, catch it to 
         // always unset our running flag.
