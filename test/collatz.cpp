@@ -1,7 +1,6 @@
 #include <dxfsm/dxfsm.hpp>
 
 #include <algorithm>
-#include <ranges>
 #include <iostream>
 
 #include <catch2/catch_test_macros.hpp>

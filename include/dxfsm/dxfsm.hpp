@@ -300,6 +300,8 @@ public:
         target._storage = std::exchange(_storage, nullptr);
         target._any_ptr = std::exchange(_any_ptr, nullptr);
         _id = std::nullopt;
+        
+        return target;
     }
 
     void Swap(Event& other) {
@@ -484,12 +486,12 @@ public:
     std::string_view Name() const { return _name; }
 
     // Set the human-readable name of the FSM
-    FSM& Name(std::string name) { _name = std::move(name); }
+    FSM& Name(std::string name) { _name = std::move(name); return *this;}
 
     // Returns the name of the target state of the latest transition.
-    auto GetCurrentState() const -> const State_t& {
+    auto GetCurrentState() const -> const State_t* {
         if (!_state) {
-            return std::nullopt;
+            return nullptr;
         }
         
         // TODO: Rework how this information is stored
@@ -529,6 +531,39 @@ public:
             LocalTransitionTarget{
                 .state = to_handle
             }
+        );
+
+        return *this;
+    }
+
+    template<typename DStateId, typename DEventId>
+    FSM& AddRemoteTransition(HandleOrId from, EventId event, FSM<DStateId, DEventId>& remote_fsm, DStateId to) {
+        static_assert(std::is_same_v<EventId, DEventId>, "Remote transition must provide EventId translation if the types do not match.");
+        
+        auto GetHandle = [this]<typename T>(const T& hoi) -> StateHandle {
+            if constexpr (std::is_same_v<T, StateHandle>) {
+                (void) this; // Ignore unused warning in this branch
+                return hoi;
+            } else if constexpr (std::is_same_v<T, StateId>) {
+                return FindState(hoi)->handle();
+            }
+        };
+
+        auto from_handle = std::visit(GetHandle, from);
+        auto to_handle = remote_fsm.FindState(to)->handle();
+
+        auto target = std::make_unique<RemoteTransitionTarget<DStateId, DEventId>>();
+
+        target->target_fsm = &remote_fsm;
+        target->target_state_handle = to_handle;
+        target->translated_event_id = event;
+
+        m_transition_table.emplace(
+            PartialTransition{
+                .from = from_handle,
+                .event = std::move(event)
+            },
+            std::move(target)
         );
 
         return *this;
@@ -692,6 +727,36 @@ public:
         return InitialReceiveAwaitable{this};
     }
 
+    
+    // Waits for an event and discards its contents whilst allowing for 
+    // storage reuse
+    struct IgnoreAwaitable {
+        FSM* self;
+
+        bool await_ready() {
+            const Event_t& pending_event = self->m_event_for_next_resume;
+            return !pending_event.Empty();
+        }
+
+        void await_suspend(StateHandle) {
+            // If there is no event ready to be read, suspend the entire FSM
+            self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+        }
+
+        void await_resume() {
+            self->m_is_fsm_active.store(true, std::memory_order::seq_cst);
+            self->m_event_for_next_resume.Clear();
+        }
+    };
+
+    friend struct IgnoreAwaitable;
+
+    // Waits for an event and discards its contents whilst allowing for 
+    // storage reuse
+    IgnoreAwaitable IgnoreEvent() {
+        return IgnoreAwaitable{this};
+    }
+
     // Adds a state to the state machine without associating any events with it.
     // Returns the index of the vector to which the state was stored.
     FSM& AddState(State_t&& state) {
@@ -710,6 +775,7 @@ public:
         
         return *this;
     }
+
     std::size_t NumStates() const { return m_states.size(); }
 
     // Kick off a suspended state machine by sending an event.
@@ -796,13 +862,15 @@ private:
 
     void TrySetActive() {
         bool is_started = false;
-        if (m_is_fsm_active.compare_exchange_strong(is_started, true, std::memory_order::seq_cst)) {
+        if (!m_is_fsm_active.compare_exchange_strong(is_started, true, std::memory_order::seq_cst)) {
             throw std::runtime_error(std::format("Attempt to insert event into FSM '{}' while it is running", Name()));
         }
     }
 
     struct RemoteDoneReporter final : detail::DoneReporterBase {
         FSM* self{};
+
+        RemoteDoneReporter(FSM& self) : self(&self) { }
 
         void ReportDone() override {
             self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
@@ -837,9 +905,8 @@ private:
             auto& originating_event = originating_fsm.m_event_for_next_resume;
             auto& target_event = target_fsm->m_event_for_next_resume;
 
-            target_event = originating_event.TransferToIdType(std::move(translated_event_id));
+            target_event = originating_event.template TransferToIdType(DEventId(translated_event_id));
 
-            originating_fsm._state = nullptr;
             target_fsm->_state = target_state_handle;
 
             originating_fsm.m_is_fsm_active.store(false, std::memory_order::seq_cst);
@@ -847,9 +914,12 @@ private:
         }
 
         auto MakeExceptionReporter() const -> std::unique_ptr<detail::DoneReporterBase> override {
-            return new typename DFSM_t::RemoteExceptionReporter{target_fsm};
+            return std::make_unique<typename DFSM_t::RemoteDoneReporter>(*target_fsm);
         }
     };
+
+    template<typename DStateId, typename DEventId>
+    friend struct RemoteTransitionTarget;
 
     using RemoteTransitionTargetPtr = std::unique_ptr<RemoteTransitionTargetBase>;
     using TransitionTarget = std::variant<LocalTransitionTarget, RemoteTransitionTargetPtr>;
