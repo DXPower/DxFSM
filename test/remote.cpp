@@ -30,8 +30,8 @@ namespace {
         Light(std::string name, StateId on_state, StateId off_state) {
             fsm.Name(name);
 
-            fsm.AddState(StateOn(fsm, on_state).Name("ON"))
-               .AddState(StateOff(fsm, off_state).Name("OFF"));
+            fsm.AddState(StateOn(fsm, on_state).Name(std::string(on_state)))
+               .AddState(StateOff(fsm, off_state).Name(std::string(off_state)));
 
             fsm.AddTransition(on_state, EventId::CycleIn, off_state)
                .AddTransition(off_state, EventId::CycleIn, on_state);
@@ -92,8 +92,8 @@ TEST_CASE("Light Remote Test Internal Types") {
     Green green("GreenFSM", "GreenOn", "GreenOff");
     Blue blue("BlueFSM", "BlueOn", "BlueOff");
     red.current_brightness = 64;
-    blue.current_brightness = 36;
     green.current_brightness = 28;
+    blue.current_brightness = 36;
 
     using EventId = ExternalEventId_e;
 
@@ -101,14 +101,46 @@ TEST_CASE("Light Remote Test Internal Types") {
     green.fsm.AddRemoteTransition("GreenOn", EventId::CycleOut, blue.fsm, "BlueOn"sv);
     blue.fsm.AddRemoteTransition("BlueOn", EventId::CycleOut, red.fsm, "RedOn"sv);
 
+    CHECK(red.fsm.GetCurrentState()->Name() == "RedOff");
+    CHECK(green.fsm.GetCurrentState()->Name() == "GreenOff");
+    CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
 
-    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn));
-    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut));
+    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
+    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 50)); // Sends 50 brightness to green
 
-    // light.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn));
-    // light.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn));
-    // light.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn));
+    CHECK(red.current_brightness == 64);
+    CHECK(green.current_brightness == 50);
+    CHECK(blue.current_brightness == 36);
+    CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
+    CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
+    CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
 
-    // CHECK_THAT(light.light_sequence, Catch::Matchers::Equals(std::vector({0, 37, 0, 37, 0})));
-    // CHECK(light.fsm.GetCurrentState()->Id() == "StateOff");
+    green.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns green off
+    green.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns green on
+    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red off
+    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
+    green.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 75)); // Sends 75 brightness to blue
+
+    CHECK(red.current_brightness == 64);
+    CHECK(green.current_brightness == 50);
+    CHECK(blue.current_brightness == 75);
+    CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
+    CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
+    CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOn");
+
+    blue.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 49)); // Sends 49 brightness to red
+
+    CHECK(red.current_brightness == 49);
+    CHECK(green.current_brightness == 50);
+    CHECK(blue.current_brightness == 75);
+    CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
+    CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
+    CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOn");
+
+    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red off
+    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
+
+    CHECK_THAT(red.light_sequence, Catch::Matchers::Equals(std::vector({0, 64, 0, 64, 49, 0, 49})));
+    CHECK_THAT(green.light_sequence, Catch::Matchers::Equals(std::vector({0, 50, 0, 50})));
+    CHECK_THAT(blue.light_sequence, Catch::Matchers::Equals(std::vector({0, 75})));
 }
