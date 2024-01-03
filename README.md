@@ -1,5 +1,21 @@
-# CoFSM - A Finite State Machine library based on Coroutine Symmetric Transfer
-CoFSM is a C++20 header-only Finite State Machine library.
+# DxFSM - A Finite State Machine library based on Coroutine Symmetric Transfer
+DxFSM is a C++20 header-only Finite State Machine library.
+
+This library was originally forked from [CoFSM](https://github.com/tirimatangi/CoFSM). Every line from the older library has been reanalyzed and rewritten for multiple reasons:
+- Transitioned the entire library from using strings as IDs to a templated user-provided type
+- Simplified and optimized Event implementation, making it more type-safe and improved its usability
+- Removed unnecessary operator overloading ("cute syntax")
+- Significantly improved the public interfaces of State and FSM to make them simpler, easier to use, and more descriptive
+- Hardened multi-threaded operation and added several new functions to handle different use-cases (more to do)
+- Fixed several bugs and implementation issues
+- Improved optimization in the handling of coroutine frames
+- Generally refactored internal code to improve quality and maintainability
+- Added tests to comprehensively show correct behavior and aide in further development
+
+Below is the original readme, as I have yet to update it with new examples.
+
+------
+
 The states are represented as coroutines which `co_await` for events.
 This makes it possible to do things like
 - Suspend the execution of FSM and later resume either from the state where it left off when it was suspended, or from another other state (see the [first example](#first-example)).
@@ -34,14 +50,14 @@ The Ping does the same until the counter becomes zero, after which the FSM is su
 The numbered points #1, #2,... in comments are explained below the code.
 ```c++
 #include <iostream>
-#include <CoFSM.h>
+#include <DxFSM.h>
 
-using CoFSM::FSM;
-using CoFSM::Event;
-using CoFSM::State;
+using DxFSM::FSM;
+using DxFSM::Event;
+using DxFSM::State;
 using std::cout;
 
-State statePing(CoFSM::FSM& fsm)  // #1
+State statePing(DxFSM::FSM& fsm)  // #1
 {
     Event event = co_await fsm.getEvent();  // #2
     while (true) {
@@ -59,7 +75,7 @@ State statePing(CoFSM::FSM& fsm)  // #1
     }
 }
 
-State statePong(CoFSM::FSM& fsm)
+State statePong(DxFSM::FSM& fsm)
 {
 /* ... The same as statePing except that words Ping and Pong are swapped ... */
 }
@@ -67,7 +83,7 @@ State statePong(CoFSM::FSM& fsm)
 ```
 - **#1** A state coroutine can have any number of arguments.
 One of the arguments must be a modifiable reference to the FSM object which is driving the state.
-The return type is always `CoFSM::State`.
+The return type is always `DxFSM::State`.
 - **#2** co_await for the first event.
 - **#3** Resolve the identity of the incoming event.
 - **#4** If the event has data attached, a pointer to the data is acquired simply by saying `event >> pData`.
@@ -75,7 +91,7 @@ In this case, the data is an integer counter.
 - **#5** Events are reusable. A new name and new data can be attached to an existing event.
 If the new data needs more space than the old one, the storage of the event is automatically expanded.
 - **#6** The event can also be cleared to make it empty and nameless. Sending such an event will suspend the FSM.
-The `Event` type is explained more thoroughly [below](#cofsmevent).
+The `Event` type is explained more thoroughly [below](#DxFSMevent).
 - **#7** Now the event is ready to be sent. `fsm.emitAndReceive` will dispatch the current event and suspend the state.
 When another state later sends an event which is routed to this state, this state will be be resumed and
 `fsm.emitAndReceive` returns with the new event.
@@ -94,7 +110,7 @@ struct Logger  // #8
 
 FSM& setup(FSM& fsm)  // #9
 {
-    using namespace CoFSM;
+    using namespace DxFSM;
 
     // Make and name the states
     fsm << (statePing(fsm) = "pingState")   // #10
@@ -189,13 +205,13 @@ If you run it on Linux laptop with `sudo` access, the morse code will be transmi
 Caps Lock / Num Lock / Scroll Lock LEDs in the keyboard.
 It should look like this:
 
-![Morse code with CoFSM (video)](examples/fsm-example-morse/SOS.gif)
+![Morse code with DxFSM (video)](examples/fsm-example-morse/SOS.gif)
 
 If you don't have `sudo` access, the dots and dashes will appear on display.
 
 The state diagram goes like this.
 
-![Morse code with CoFSM (state diagram)](examples/fsm-example-morse/fsm-morse.png)
+![Morse code with DxFSM (state diagram)](examples/fsm-example-morse/fsm-morse.png)
 
 Let's look at the prototypes and functionalities of these three states.
 
@@ -293,7 +309,7 @@ They are identical so we use [fsm-red.cc](examples/fsm-example-rgb/fsm-red.cc) a
 FSM* makeRedFsm()
 {
     static FSM redFSM("RED-FSM");
-    using CoFSM::transition;
+    using DxFSM::transition;
 
     // Register and name the states.
     redFSM << (redIdleState(redFSM)   = "RedIdleState")
@@ -441,11 +457,11 @@ Runnable code and makefile can be found in folder [fsm-example-ring](examples/fs
 
 The library consists of the classes, `FSM`, `Event` and `State`. The classes and their methods are explained in the following chapters.
 
-### CoFSM::FSM
+### DxFSM::FSM
 
 - `FSM(std::string fsmName)` constructor of the FSM class. The name of the FSM is for information only and can be omitted.
 - `const std::string& name()` returns the name of the FSM given in the constructor.
-- `const CoFSM::Event& latestEvent()` returns const ref to the latest event which was sent to a state. If the FSM is suspended, the event is empty.
+- `const DxFSM::Event& latestEvent()` returns const ref to the latest event which was sent to a state. If the FSM is suspended, the event is empty.
 - `const std::string& currentState()` returns the name of the state to which the latest event was routed. If the state has not been assigned a symbolic name, the returned value will be the address of the coroutine converted to string. <br>
 If a state wants to find out its name, it can do so by calling `fsm->currentState()` where `fsm` is the reference given to the state coroutine.
 - `FSM& setState(std::string_view stateName)` sets the current state to which the first event will be sent (see `sendEvent`) and returns ref to self.
@@ -481,7 +497,7 @@ It holds a callable of type `void logger(const std::string& fsmName, const std::
 ```
 - `const std::atomic<bool>& isActive()`  Returns const reference to the atomic flag which tells if the FSM is running (i.e. one state is not suspended) and false if all states are suspended.
 
-### CoFSM::Event
+### DxFSM::Event
 
 An event consists of the name of the event and an optional storage which holds the data which the sender state wants to pass to the recipient state.
 
@@ -491,7 +507,7 @@ Typically an FSM needs only one Event object because the same event can be reuse
 
 Suppose that you have a pointer to an FSM which has been created and initialized earlier. Furthermore, you have a stop token which you want to store in an event called "HandOverEvent". Now you want to start the FSM by sending "HandOverEvent" to a state called "IdleState". The code which does it goes something like this:
 ```c++
-    using namespace CoFSM;
+    using namespace DxFSM;
     FSM* fsm;
     // ... create and initialize the fsm  (not shown here) ...
     fsm->start().setState("IdleState"); // Start the states and sent the current state.
@@ -515,7 +531,7 @@ Now the Event object is empty and can be reused for sending the next event. In t
 
 The event can now be sent and the next event sent to this state can be received by calling `co_await fsm.emitAndReceive(&event)`.
 ```c++
-CoFSM::State  IdleState(FSM& fsm)
+DxFSM::State  IdleState(FSM& fsm)
 {
     // ... local variable definitions (not shown here) ...
     Event event = co_await fsm.getEvent(); // Await for the first event
@@ -582,7 +598,7 @@ Also, the event becomes empty in the sense that is has neither name nor valid da
 ```
 However, `dataAs<T>()` does not enforce the type of the destination pointer like operator `>>` does, so the latter should be preferred.
 
-### CoFSM::State
+### DxFSM::State
 `State`is the return type of every state coroutine. Like every [coroutine](https://en.cppreference.com/w/cpp/language/coroutines), it is associated with a `handle` and a `promise`. Generally you don't need to worry about them or explicitly call any methods of `State` class. Some methods are given below anyway in case you want to experiment with coroutines.
 - `handle_type handle()` returns a handle to the coroutine. `handle_type` is defined as `std::coroutine_handle<promise_type>` as is customary in coroutine programming.
 - `State&& setName(std::string stateName)` Sets a name for the state. Normally the name is set with operator `=` like in every example above.
