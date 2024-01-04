@@ -48,6 +48,10 @@ namespace {
 
                 if (event == EventId::CycleOut) {
                     current_brightness = event.template Get<int>();
+
+                    if (current_brightness == 0xDEAD) {
+                        throw std::runtime_error("DEAD!");
+                    }
                 }
 
                 light_sequence.push_back(current_brightness);
@@ -83,7 +87,7 @@ TEST_CASE("Light Local Test") {
     CHECK(light.fsm.GetCurrentState()->Id() == "StateOff");
 }
 
-TEST_CASE("Light Remote Test Internal Types") {
+TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[remote][advanced][exceptions]") {
     using Red = Light<false, 0>;
     using Green = Light<false, 1>;
     using Blue = Light<false, 2>;
@@ -101,46 +105,76 @@ TEST_CASE("Light Remote Test Internal Types") {
     green.fsm.AddRemoteTransition("GreenOn", EventId::CycleOut, blue.fsm, "BlueOn"sv);
     blue.fsm.AddRemoteTransition("BlueOn", EventId::CycleOut, red.fsm, "RedOn"sv);
 
-    CHECK(red.fsm.GetCurrentState()->Name() == "RedOff");
-    CHECK(green.fsm.GetCurrentState()->Name() == "GreenOff");
-    CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
+    SECTION("Normal Operation") {
+        CHECK(red.fsm.GetCurrentState()->Name() == "RedOff");
+        CHECK(green.fsm.GetCurrentState()->Name() == "GreenOff");
+        CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
 
-    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
-    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 50)); // Sends 50 brightness to green
+        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
+        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 50)); // Sends 50 brightness to green
 
-    CHECK(red.current_brightness == 64);
-    CHECK(green.current_brightness == 50);
-    CHECK(blue.current_brightness == 36);
-    CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
-    CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
-    CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
+        CHECK(red.current_brightness == 64);
+        CHECK(green.current_brightness == 50);
+        CHECK(blue.current_brightness == 36);
+        CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
+        CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
+        CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
 
-    green.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns green off
-    green.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns green on
-    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red off
-    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
-    green.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 75)); // Sends 75 brightness to blue
+        green.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns green off
+        green.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns green on
+        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red off
+        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
+        green.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 75)); // Sends 75 brightness to blue
 
-    CHECK(red.current_brightness == 64);
-    CHECK(green.current_brightness == 50);
-    CHECK(blue.current_brightness == 75);
-    CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
-    CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
-    CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOn");
+        CHECK(red.current_brightness == 64);
+        CHECK(green.current_brightness == 50);
+        CHECK(blue.current_brightness == 75);
+        CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
+        CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
+        CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOn");
 
-    blue.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 49)); // Sends 49 brightness to red
+        blue.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 49)); // Sends 49 brightness to red
 
-    CHECK(red.current_brightness == 49);
-    CHECK(green.current_brightness == 50);
-    CHECK(blue.current_brightness == 75);
-    CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
-    CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
-    CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOn");
+        CHECK(red.current_brightness == 49);
+        CHECK(green.current_brightness == 50);
+        CHECK(blue.current_brightness == 75);
+        CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
+        CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
+        CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOn");
 
-    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red off
-    red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
+        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red off
+        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
 
-    CHECK_THAT(red.light_sequence, Catch::Matchers::Equals(std::vector({0, 64, 0, 64, 49, 0, 49})));
-    CHECK_THAT(green.light_sequence, Catch::Matchers::Equals(std::vector({0, 50, 0, 50})));
-    CHECK_THAT(blue.light_sequence, Catch::Matchers::Equals(std::vector({0, 75})));
+        CHECK_THAT(red.light_sequence, Catch::Matchers::Equals(std::vector({0, 64, 0, 64, 49, 0, 49})));
+        CHECK_THAT(green.light_sequence, Catch::Matchers::Equals(std::vector({0, 50, 0, 50})));
+        CHECK_THAT(blue.light_sequence, Catch::Matchers::Equals(std::vector({0, 75})));
+    }
+
+    SECTION("Exception Safety") {
+        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
+        CHECK_THROWS_WITH(red.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 0xDEAD)), "DEAD!");
+
+        auto CheckFailedStates = [&]<typename S, typename E>(const dxfsm::FSM<S, E>& fsm, std::string_view expected_id = "") {
+            std::vector<const dxfsm::State<S>*> failed_states{};
+            std::ranges::copy(fsm.GetAbominableStates() | std::views::transform([](const auto& s) {
+                return &s;
+            }), std::back_inserter(failed_states));
+
+            if (expected_id == "") {
+                CHECK(failed_states.size() == 0);
+            } else {
+                REQUIRE(failed_states.size() == 1);
+                CHECK(failed_states[0]->Id() == expected_id);
+                CHECK(failed_states[0]->IsAbominable());
+            }
+        };
+
+        CheckFailedStates(red.fsm);
+        CheckFailedStates(green.fsm, "GreenOn");
+        CheckFailedStates(blue.fsm);
+
+        CHECK_FALSE(red.fsm.IsActive());
+        CHECK_FALSE(green.fsm.IsActive());
+        CHECK_FALSE(blue.fsm.IsActive());
+    }
 }

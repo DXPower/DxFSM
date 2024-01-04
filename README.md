@@ -7,10 +7,26 @@ This library was originally forked from [CoFSM](https://github.com/tirimatangi/C
 - Removed unnecessary operator overloading ("cute syntax")
 - Significantly improved the public interfaces of State and FSM to make them simpler, easier to use, and more descriptive
 - Hardened multi-threaded operation and added several new functions to handle different use-cases (more to do)
+- Made the library exception safe (details below)
 - Fixed several bugs and implementation issues
 - Improved optimization in the handling of coroutine frames
 - Generally refactored internal code to improve quality and maintainability
 - Added tests to comprehensively show correct behavior and aide in further development
+
+
+------
+## Exception Safety
+
+DxFSM is fully exception-safe and is able to recover from exceptions thrown out of a State coroutine.
+When this happens, the coroutine frame is destroyed (part of C++20 Coroutines), and its associated State 
+object will persist. The State is thus marked as "Abominable," meaning it is no longer associated with a
+coroutine frame due to an unhandled exception. The unhandled exception is rethrown from the point of external resumption of the State coroutine (the InsertEvent call). The user may catch this exception and
+orchestrate the recovery of the FSM object; this would entail removing the abominable state(s) and readding
+them.
+
+Exception Safety TODO:
+- Need to test exceptions being thrown on initial creation of State object
+- Use StateId instead of coroutine handle in transition table to avoid having to recreate transitions
 
 Below is the original readme, as I have yet to update it with new examples.
 
