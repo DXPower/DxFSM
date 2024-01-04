@@ -459,7 +459,7 @@ namespace detail {
     struct DoneReporterBase {
         virtual ~DoneReporterBase() = default;
 
-        virtual void ReportDone() = 0;
+        virtual void ReportDone() const = 0;
     };
 }
 
@@ -867,16 +867,6 @@ private:
         }
     }
 
-    struct RemoteDoneReporter final : detail::DoneReporterBase {
-        FSM* self{};
-
-        RemoteDoneReporter(FSM& self) : self(&self) { }
-
-        void ReportDone() override {
-            self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
-        }
-    };
-
     struct LocalTransitionTarget {
         StateHandle state{};
     };
@@ -885,12 +875,12 @@ private:
         virtual ~RemoteTransitionTargetBase() = default;
 
         virtual std::coroutine_handle<> TryTransitionOnRemote(FSM& originating_fsm) const = 0;
-        virtual auto MakeExceptionReporter() const -> std::unique_ptr<detail::DoneReporterBase> = 0;
+        virtual const detail::DoneReporterBase& GetTargetDoneReporter() const = 0;
     };
 
     // D... = Destination
     template<typename DStateId, typename DEventId>
-    struct RemoteTransitionTarget final : RemoteTransitionTargetBase {
+    struct RemoteTransitionTarget final : RemoteTransitionTargetBase, detail::DoneReporterBase {
         using DFSM_t = FSM<DStateId, DEventId>;
 
         DFSM_t* target_fsm{};
@@ -913,8 +903,12 @@ private:
             return target_state_handle;
         }
 
-        auto MakeExceptionReporter() const -> std::unique_ptr<detail::DoneReporterBase> override {
-            return std::make_unique<typename DFSM_t::RemoteDoneReporter>(*target_fsm);
+        const detail::DoneReporterBase& GetTargetDoneReporter() const override {
+            return *this;
+        };
+        
+        void ReportDone() const override {
+            target_fsm->m_is_fsm_active.store(false, std::memory_order::seq_cst);
         }
     };
 
@@ -926,7 +920,7 @@ private:
 
     struct TransitionResult {
         std::coroutine_handle<> state_to_resume{};
-        std::unique_ptr<detail::DoneReporterBase> remote_done_reporter{};
+        const detail::DoneReporterBase* remote_done_reporter{};
 
         bool IsRemote() const {
             return remote_done_reporter != nullptr;
@@ -957,7 +951,7 @@ private:
 
                 return {
                     .state_to_resume = remote_handle,
-                    .remote_done_reporter = remote.MakeExceptionReporter()
+                    .remote_done_reporter = &remote.GetTargetDoneReporter()
                 };
             }
         }, *transition);
