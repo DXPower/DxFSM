@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_templated.hpp>
 #include <catch2/matchers/catch_matchers_vector.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 using namespace dxfsm;
 
@@ -183,6 +184,10 @@ TEST_CASE("Collatz FSM Exceptions", "[advanced][exceptions]") {
     CHECK(failed_states[0]->Id() == StateId::Processing);
     CHECK(failed_states[0]->IsAbominable());
 
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(collatz.fsm.SetCurrentState(StateId::Processing), ContainsSubstring("Attempt to set abominable state"));
+    CHECK(collatz.fsm.GetCurrentState() == nullptr);
+    
     collatz.fsm.RemoveAbominableStates();
     CHECK(std::ranges::distance(collatz.fsm.GetAbominableStates()) == 0);
 }

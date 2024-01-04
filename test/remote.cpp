@@ -176,5 +176,11 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK_FALSE(red.fsm.IsActive());
         CHECK_FALSE(green.fsm.IsActive());
         CHECK_FALSE(blue.fsm.IsActive());
+
+        REQUIRE(red.fsm.GetCurrentState() != nullptr);
+        CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
+        CHECK(green.fsm.GetCurrentState() == nullptr);
+        REQUIRE(blue.fsm.GetCurrentState() != nullptr);
+        CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
     }
 }

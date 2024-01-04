@@ -13,6 +13,12 @@ This library was originally forked from [CoFSM](https://github.com/tirimatangi/C
 - Generally refactored internal code to improve quality and maintainability
 - Added tests to comprehensively show correct behavior and aide in further development
 
+Additionally, new features have been added (all are TODO):
+- **Event Queueing**: Thread-safely enqueue an event to be automatically inserted the next time the FSM suspends.
+This is useful for when state processing occurs in the background over an extended but finite period of time.
+- **Event Channels**: Thread-safely enqueue events to an ID'ed channel that can be co-awaited with a timeout.
+This is useful if you want to send data to a state for it to eventually read, particularly for FSMs that never
+suspend processing on a background thread.
 
 ------
 ## Exception Safety

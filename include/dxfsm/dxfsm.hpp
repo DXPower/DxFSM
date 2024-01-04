@@ -459,7 +459,7 @@ namespace detail {
     struct DoneReporterBase {
         virtual ~DoneReporterBase() = default;
 
-        virtual void ReportDone() const = 0;
+        virtual void ReportDone(bool nullify_current_state) const = 0;
     };
 }
 
@@ -503,6 +503,12 @@ public:
 
         if (state == nullptr)
             throw std::runtime_error(std::format("Attempt to set nonexistent state on FSM '{}'", Name()));
+        else if (state->IsAbominable())
+            throw std::runtime_error(std::format(
+                "Attempt to set abominable state '{}' as current on FSM '{}'",
+                state->Name(),
+                Name()
+            ));
         
         _state = state->handle();
         return *this;
@@ -802,9 +808,10 @@ public:
             state_to_resume.resume();
         } catch (...) {
             if (potential_transition.has_value() && potential_transition->IsRemote()) {
-                potential_transition->remote_done_reporter->ReportDone();
+                potential_transition->remote_done_reporter->ReportDone(true);
             } else {
                 m_is_fsm_active.store(false, std::memory_order::seq_cst);
+                _state = nullptr;
             }
             throw;
         }
@@ -907,8 +914,12 @@ private:
             return *this;
         };
         
-        void ReportDone() const override {
+        void ReportDone(bool nullify_current_state) const override {
             target_fsm->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+
+            if (nullify_current_state) {
+                target_fsm->_state = nullptr;
+            }
         }
     };
 
