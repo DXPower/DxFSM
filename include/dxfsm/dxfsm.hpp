@@ -10,7 +10,6 @@
 #include <functional>
 #include <vector>
 #include <cassert>
-#include <atomic>
 #include <any>
 #include <optional>
 #include <format>
@@ -637,7 +636,7 @@ public:
             // If a state emits an empty event all states will remain suspended.
             // Consequently, the FSM will stopped. It can be restarted by calling SendEvent()
             if (pending_event.Empty()) {
-                self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+                self->m_is_fsm_active = false;
                 return std::noop_coroutine();
             }
 
@@ -651,7 +650,7 @@ public:
             }
 
             if (transition->IsRemote()) {
-                self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+                self->m_is_fsm_active = false;
             }
 
             return transition->state_to_resume;
@@ -684,11 +683,11 @@ public:
 
         void await_suspend(StateHandle) {
             // If there is no event ready to be read, suspend the entire FSM
-            self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            self->m_is_fsm_active = false;
         }
 
         void await_resume() {
-            self->m_is_fsm_active.store(true, std::memory_order::seq_cst);
+            self->m_is_fsm_active = true;
             *event_return = std::move(self->m_event_for_next_resume);
         }
     };
@@ -718,11 +717,11 @@ public:
 
         void await_suspend(StateHandle) {
             // If there is no event ready to be read, suspend the entire FSM
-            self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            self->m_is_fsm_active = false;
         }
 
         [[nodiscard]] Event_t await_resume() {
-            self->m_is_fsm_active.store(true, std::memory_order::seq_cst);
+            self->m_is_fsm_active = true;
             return std::move(self->m_event_for_next_resume);
         }
     };
@@ -746,11 +745,11 @@ public:
 
         void await_suspend(StateHandle) {
             // If there is no event ready to be read, suspend the entire FSM
-            self->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            self->m_is_fsm_active = false;
         }
 
         void await_resume() {
-            self->m_is_fsm_active.store(true, std::memory_order::seq_cst);
+            self->m_is_fsm_active = true;
             self->m_event_for_next_resume.Clear();
         }
     };
@@ -810,7 +809,7 @@ public:
             if (potential_transition.has_value() && potential_transition->IsRemote()) {
                 potential_transition->remote_done_reporter->ReportDone(true);
             } else {
-                m_is_fsm_active.store(false, std::memory_order::seq_cst);
+                m_is_fsm_active = false;
                 _state = nullptr;
             }
             throw;
@@ -838,7 +837,6 @@ public:
     // Returns true if the FSM is running and false if all states
     // are suspended and waiting for an event.
     bool IsActive() const { return m_is_fsm_active; }
-    const std::atomic<bool>& GetActiveFlag() const { return m_is_fsm_active; }
 
 
     // Callback for debugging and writing log. It is called when the state of
@@ -868,10 +866,11 @@ private:
     }
 
     void TrySetActive() {
-        bool is_started = false;
-        if (!m_is_fsm_active.compare_exchange_strong(is_started, true, std::memory_order::seq_cst)) {
+        if (m_is_fsm_active) {
             throw std::runtime_error(std::format("Attempt to insert event into FSM '{}' while it is running", Name()));
         }
+
+        m_is_fsm_active = true;
     }
 
     struct LocalTransitionTarget {
@@ -906,7 +905,7 @@ private:
 
             target_fsm->_state = target_state_handle;
 
-            originating_fsm.m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            originating_fsm.m_is_fsm_active = false;
             return target_state_handle;
         }
 
@@ -915,7 +914,7 @@ private:
         };
         
         void ReportDone(bool nullify_current_state) const override {
-            target_fsm->m_is_fsm_active.store(false, std::memory_order::seq_cst);
+            target_fsm->m_is_fsm_active = false;
 
             if (nullify_current_state) {
                 target_fsm->_state = nullptr;
@@ -999,7 +998,7 @@ private:
     std::vector<State_t> m_states;
 
     // True if the FSM is running, false if suspended.
-    std::atomic<bool> m_is_fsm_active = false;
+    bool m_is_fsm_active = false;
 
     // Temporary event storage to be captured by Awaitable on resume
     Event_t m_event_for_next_resume{};
