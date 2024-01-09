@@ -367,7 +367,7 @@ private:
 
     template<typename T>
     friend class Event;
-}; // Event
+};
 
 template<typename Id>
 void swap(Event<Id>& lhs, Event<Id>& rhs) {
@@ -378,8 +378,20 @@ template<typename StateId, typename EventId>
 class FSM;
 
 // Return type of coroutines which represent states.
+/// @brief The coroutine handle type that represents discrete states in the FSM
+/// @details This class should be the return type of each function intended to be a state in the FSM.
+/// This type is automatically constructed when the function is called (part of C++20 Coroutines).
+/// Once returned, it should be moved into the FSM via @ref FSM::AddState.
+/// The function may be a non-static member, but its signature must be:\n
+/// `State<StateId> Func(FSM<StateId, EventId>&, StateId id)`.
+/// @tparam StateId The type to use as the @ref State Id
 template<typename StateId>
-struct State {
+class State {
+public:
+    /// @brief The type automatically constructed by the C++20 Coroutines system when a
+    /// a coroutine returning State is called.
+    /// @details This type is automatically managed by C++20 Coroutines. It is of
+    /// no importance to an end-user of this library.
     struct promise_type {
         promise_type() = delete; // State must take FSM& and Id parameters
 
@@ -406,53 +418,24 @@ struct State {
         StateId id;
     };
 
+private:
     using handle_type = std::coroutine_handle<promise_type>;
 
-    // State has one-to-one correspondence to its coroutine handle
-    handle_type handle() const noexcept { return m_coro_handle; }
+    handle_type m_coro_handle{};
+    // Need a copy of the ID here in case the coroutine throws an exception, as the promise
+    // object gets destroyed. This keeps the State object queryable for its identifying information.
+    StateId m_id{};
+    std::string m_name{};
+    bool m_is_abominable{};
 
-    // State has one-to-one correspondence to its coroutine handle
-    operator handle_type() const noexcept { return m_coro_handle; }
-
-    StateId Id() const {
-        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
-            throw std::runtime_error("Attempt to get the ID of a state not associated with a coroutine");
-        }
-
-        return m_id;
+    explicit State(promise_type *p) noexcept 
+        : m_coro_handle(handle_type::from_promise(*p)),
+          m_id(p->id)
+    {
+        p->self = this;
     }
 
-    // Sets human-readable name for the state.
-    State& Name(std::string state_name) & {
-        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
-            throw std::runtime_error("Attempt to set the name of State not associated with a coroutine");
-        }
-
-        m_name = std::move(state_name);
-        return *this;
-    }
-
-    // Sets human-readable name for the state.
-    State&& Name(std::string state_name) && {
-        return std::move(this->Name(state_name));
-    }
-
-    // Gets the human-readable name for the state.
-    std::string_view Name() const {
-        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
-            throw std::runtime_error("Attempt to get the name of a State not associated with a coroutine");
-        }
-
-        return m_name;
-    }
-
-    // Abominable means that this state was killed due to an exception,
-    // and should be removed or readded by the user.
-    bool IsAbominable() const {
-        return m_is_abominable;
-    }
-
-    // Move constructors.
+public:
     State(State&& other) noexcept 
         : m_coro_handle(std::exchange(other.m_coro_handle, nullptr)),
           m_id(std::exchange(other.m_id, {})),
@@ -471,28 +454,61 @@ struct State {
         return *this;
     }
 
+    State(const State&) = delete;
+    State& operator=(const State&) = delete;
+
     ~State() {
         if (m_coro_handle)
             m_coro_handle.destroy();
     }
-private:
-    // A state is move-only
-    State(const State&) = delete;
-    State& operator=(const State&) = delete;
 
-    explicit State(promise_type *p) noexcept 
-        : m_coro_handle(handle_type::from_promise(*p)),
-          m_id(p->id)
-    {
-        p->self = this;
+    /// @brief Gets the Id of this State.
+    /// @details This id is automatically retrieved from the id parameter when the State coroutine was called.
+    StateId Id() const {
+        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
+            throw std::runtime_error("Attempt to get the ID of a state not associated with a coroutine");
+        }
+
+        return m_id;
     }
 
-    handle_type m_coro_handle{};
-    // Need a copy of the ID here in case the coroutine throws an exception, as the promise
-    // object gets destroyed. This keeps the State object queryable for its identifying information.
-    StateId m_id{};
-    std::string m_name{};
-    bool m_is_abominable{};
+    /// @brief Sets the human-readable name.
+    State& Name(std::string state_name) & {
+        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
+            throw std::runtime_error("Attempt to set the name of State not associated with a coroutine");
+        }
+
+        m_name = std::move(state_name);
+        return *this;
+    }
+
+    /// @brief Sets the human-readable name.
+    State&& Name(std::string state_name) && {
+        return std::move(this->Name(state_name));
+    }
+
+    /// @brief Gets the human-readable name.
+    std::string_view Name() const {
+        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
+            throw std::runtime_error("Attempt to get the name of a State not associated with a coroutine");
+        }
+
+        return m_name;
+    }
+
+    /// @brief Gets whether this state is abominable
+    /// @details Abominable means that this state was killed due to an exception,
+    /// and should be removed and possibly readded by the user.
+    bool IsAbominable() const {
+        return m_is_abominable;
+    }
+
+private:
+    handle_type handle() const noexcept { return m_coro_handle; }
+    operator handle_type() const noexcept { return m_coro_handle; }
+
+    template<typename S, typename E>
+    friend class FSM;
 }; // State
 
 namespace detail {
