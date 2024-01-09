@@ -102,32 +102,39 @@ namespace detail {
     };
 }
 
-// Generic reusable Event class.
-// An object of this type hold its identity in a string_view
-// and data in a byte buffer. Hence an event object can be reused
-// by replacing the identity with a new one and storing the data
-// of the new event in the buffer. If the buffer is too small
-// for the data, it will be extended a bit like std::vector does.
-// The buffer never shrinks but can be reset to zero lenght like std::vector.
+/// @brief Facilitates transmittal of data into @ref State "States" via a reusable storage block.
+/// @details Events are the basic unit of data transfer between @ref State "States".
+/// Events can store any data in a type-safe manner, including nothing (similar to `std::any`).
+/// States can use `co_await` expressions on the FSM to suspend until they receive an event,
+/// such as with @link ReceiveEvent @endlink or @link EmitAndReceive @endlink.
+/// This class manages a resizable buffer that automatically expands to the largest
+/// data stored.
+/// @tparam Id Type to use as the Event Id
 template<typename Id>
 class Event {
 public:
     using Id_t = Id;
 
+    /// @brief Constructs an empty event
     Event() noexcept = default;
+    /// @brief Constructs an event that stores an Id without any additional data
     explicit Event(Id id) noexcept : _id(std::move(id)) { }
 
+    /// @brief Constructs an event that stores an Id with an additional object as its stored data
     template<typename T>
     Event(Id id, T&& data) {
         Store(std::move(id), std::forward<T>(data));
     }
 
+    /// @brief Constructs an event that stores an Id as well as constructs the stored data in-place
+    /// @tparam T Type to emplace
+    /// @param args Arguments to forward to the constructor of @p T
+    /// @param type Tag parameter. Use std::in_place_type to create.
     template<typename T, typename... Args >
     Event(Id id, std::in_place_type_t<T> type [[maybe_unused]], Args&&... args) {
         Emplace<T>(std::move(id), std::forward<Args>(args)...);
     }
 
-    // Moves
     Event(Event&& other) noexcept {
         _id = std::exchange(other._id, std::nullopt);
         _capacity = std::exchange(other._capacity, 0u);
@@ -143,26 +150,27 @@ public:
         return *this;
     }
 
-    // Shorthand for updating an event to a new ID without accidental move-assignment,
-    // which would cause the internal buffer to be replaced.
+    /// @brief Updates this Event's Id and clears its stored data.
+    /// @details Equivalent to @ref Event::Store "Store(id)"
     Event& operator=(Id id) {
         Store(std::move(id));
         return *this;
     }
 
     ~Event() {
-        // If *_any_ptr contains an AnyPtr<T> object which points to the buffer,
-        // the object living in the buffer will be destroyed at the destructor of AnyPtr<T>
-        _any_ptr.Reset();
+        _any_ptr.Reset(); // This will destroy the data in storage
         delete[] _storage;
     }
 
-    // Constructs a new event without associated data
+    /// @brief Updates this Event's Id and clears its stored data.
     void Store(Id id) {
         this->_id = std::move(id);
         _any_ptr.Reset();  // Destroy the object currently living in the buffer by implicitly invoking AnyPtr<T> destructor.
     }
 
+    /// @brief Updates this Event's Id and stores the provided object as its data
+    /// @return Reference to the stored object
+    /// @details Any previously stored data is destroyed
     template<typename T>
     std::decay_t<T>& Store(Id id, T&& data) {
         _any_ptr.Reset();
@@ -177,6 +185,11 @@ public:
         return *ptr;
     }
 
+    /// @brief Updates this Event's Id and constructs an object in-place in its storage using the provided arguments
+    /// @details Any previously stored data is destroyed
+    /// @tparam T Type to construct
+    /// @param args Arguments to forward to the constructor of @p T
+    /// @returns Reference to the constructed object in the storage
     template<typename T, typename... Args>
     T& Emplace(Id id, Args&&... args) {
         _any_ptr.Reset();
@@ -190,13 +203,17 @@ public:
         return *ptr;
     }
         
+    /// @brief Makes this Event Empty by clearing the Id and destroying stored data. Storage is not deallocated.
     void Clear() {
         this->_id.reset();
         _any_ptr.Reset();
     }
 
-    // If the type of the object stored in the buffer is not T, an exception will be thrown.
-    // So you can not accidentally read the data in a wrong format.
+    /// @brief Safely gets the stored object, throwing an exception if the requested type is not stored.
+    /// @tparam T The type to extract
+    /// @returns Reference to the stored object
+    /// @exception std::runtime_error Thrown if this Event is empty, does not store an object, or the type
+    /// of the stored object is not @p T.
     template<class T>
     T& Get() {
         T* ptr = _any_ptr.TryExtract<T>();
@@ -208,6 +225,11 @@ public:
         return *ptr;
     }
 
+    /// @brief Safely gets the stored object, throwing an exception if the requested type is not stored.
+    /// @tparam T The type to extract
+    /// @returns Reference to the stored object
+    /// @exception std::runtime_error Thrown if this Event is empty, does not store an object, or the type
+    /// of the stored object is not @p T.
     template<class T>
     const T& Get() const {
         const T* ptr = _any_ptr.TryExtract<T>();
@@ -219,44 +241,59 @@ public:
         return *ptr;
     }
 
+    /// @brief Safely gets the stored object, returning a `nullptr` if the requested type is not stored.
+    /// @tparam T The type to extract
+    /// @returns Pointer to the stored object, or `nullptr` if the requested type is not stored.
     template<class T>
     T* GetMaybe() {
         return _any_ptr.TryExtract<T>();
     }
 
+    /// @brief Safely gets the stored object, returning a `nullptr` if the requested type is not stored.
+    /// @tparam T The type to extract
+    /// @returns Pointer to the stored object, or `nullptr` if the requested type is not stored.
     template<class T>
     const T* GetMaybe() const {
         return _any_ptr.TryExtract<T>();
     }
 
-    // Reinterprets the data buffer as an object of type T.
+    /// @brief Unsafely gets the stored object without checking its type.
+    /// @details Calling this function is undefined behavior if the stored object is not of type @p T.
+    /// @tparam T The type to extract
+    /// @returns Reference to the stored object
     template<class T>
     T& GetUnchecked() {
         return *std::launder(reinterpret_cast<T*>(_storage));
     }
 
-    // Reinterprets the data buffer as an object of type T.
+    /// @brief Unsafely gets the stored object without checking its type.
+    /// @details Calling this function is undefined behavior if the stored object is not of type @p T.
+    /// @tparam T The type to extract
+    /// @returns Reference to the stored object
     template<class T>
     const T& GetUnchecked() const {
         return *std::launder(reinterpret_cast<const T*>(_storage));
     }
 
-    // Returns pointer to the data buffer
+    /// @brief Gets the underlying storage buffer.
     void* Data() {
         return _storage;
     }
 
+    /// @brief Gets the underlying storage buffer.
     const void* Data() const {
         return _storage;
     }
 
-    // Deletes all allocated data and resets the event to its default, empty state
+    /// @brief Deletes all allocated data and resets the event to its default, empty state
     void ReleaseStorage() {
         Event dummy{};
         this->Swap(dummy);
     }
 
-    // Reserves space for event data. The existing data may be wiped out.
+    /// @brief Reserves space in the underlying storage.
+    /// @details Invalidates pointers to the stored data and the the underlying storage.
+    /// If reallocation occurs, the stored data is destroyed <b>and not recreated</b>.
     void Reserve(std::size_t size) {
         if (_capacity < size) {
             if (_any_ptr.HasValue())  // Destroy the stored object if it exists
@@ -269,17 +306,18 @@ public:
         }
     }
 
-    // Returns the maximum size of an object which can be constructed
-    // in the data buffer without reallocation.
+    /// @brief Returns the maximum size of an object which can be constructed
+    /// in the data buffer without reallocation.
     std::size_t Capacity() const { return _capacity; }
 
-    // Returns true if the name of the event == other
+    /// @brief Compares the Id of this event.
     bool operator==(const Id& id) const { return _id.has_value() && _id.value() == id; }
 
-    // Returns true if the event is empty (i.e. _id is not set)
+    /// @brief Returns true if the event is empty (ie., no Id is stored).
     [[nodiscard]] bool Empty() const { return !_id.has_value(); }
 
-    // Checks if the event has stored data associated with it
+    /// @brief Checks if the event has stored data associated with it
+    /// @tparam T If not void, will check if the stored data (if any) matches this type.
     template<typename T = void>
     bool HasData() const {
         if constexpr (std::is_same_v<T, void>) {
@@ -289,8 +327,11 @@ public:
         }
     }
 
+    /// @brief Gets the Id of this event.
     const Id& GetId() const { return _id.value(); }
 
+    /// @brief Transfers ownership of the storage to a new Event object with a different Id type.
+    /// @details `this` will be left in an empty state and zero capacity.
     template<typename NewId>
     Event<NewId> TransferToIdType(NewId&& new_id) {
         Event<NewId> target{};

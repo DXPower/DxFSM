@@ -12,6 +12,8 @@ target_include_directories(dxfsm INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 enable_testing()
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/test)
 
+find_package(Doxygen)
+doxygen_add_docs(dxfsm_docs ${CMAKE_CURRENT_SOURCE_DIR}/include/dxfsm/dxfsm.hpp)
 
 # # Mark as system include to disable warnings
 # set_target_properties(dxfsm PROPERTIES 
