@@ -519,7 +519,9 @@ namespace detail {
     };
 }
 
-// Finite State Machine class
+/// @brief The core class for representing a Finite State Machine
+/// @details This class needs to be created first so it can be passed
+/// to the State coroutines when they are started.
 template<typename StateId, typename EventId>
 class FSM {
 public:
@@ -527,24 +529,26 @@ public:
     using Event_t = Event<EventId>;
     using StateHandle = typename State_t::handle_type;
 
-    // Gives the FSM a human-readable name.
     FSM() = default;
-    FSM(std::string fsm_name) : _name(std::move(fsm_name)) { }
+    FSM(std::string human_name) : _name(std::move(human_name)) { }
 
-    // Delete copies and moves
-    // TODO: implement moves
     FSM(const FSM&) = delete;
+    /// @todo: Implement FSM move semantics
     FSM(FSM&&) = delete;
     FSM& operator=(const FSM&) = delete;
+    /// @todo: Implement FSM move semantics
     FSM& operator=(FSM&&) = delete;
 
-    // Get the human-readable name of the FSM
+    /// @brief Gets the human-readable name
     std::string_view Name() const { return _name; }
 
-    // Set the human-readable name of the FSM
+    /// @brief Sets the human-readable name
     FSM& Name(std::string name) { _name = std::move(name); return *this;}
 
-    // Returns the name of the target state of the latest transition.
+    /// @brief Gets the current state of the FSM, `nullptr` if there is no current state
+    /// @details If the previous resumption of the state machine resulted in an abominable state
+    /// being created (unhandled exception was thrown from it), then the current state is cleared.
+    /// In other words, the current state will never be abominable.
     auto GetCurrentState() const -> const State_t* {
         if (!_state) {
             return nullptr;
@@ -554,6 +558,9 @@ public:
         return FindState(_state.promise().id);
     }
 
+    /// @brief Sets the current state of the FSM.
+    /// @details The previous state will remain in its prior stage in execution; ie.,
+    /// no resumption or restart occurs on the former current state.
     FSM& SetCurrentState(StateId id) {
         auto* state = FindState(id);
 
@@ -572,6 +579,13 @@ public:
 
     using HandleOrId = std::variant<StateHandle, StateId>;
 
+    /// @brief Adds a transition that defines `from->to` whenever \p event is sent to this FSM.
+    /// @details After this function is called, whenever the current state is \p from, and the FSM
+    /// receives an event with the Id \p event, then it will automatically transition the current state
+    /// to \p to before execution resumes. Both internally generated and externally generated events
+    /// will trigger this transition.\n
+    /// The combination of (from, event) forms a unique transition. If such a transition already exists,
+    /// then its target \p to will be replaced.
     FSM& AddTransition(HandleOrId from, EventId event, HandleOrId to) {
         auto GetHandle = [this]<typename T>(const T& hoi) -> StateHandle {
             if constexpr (std::is_same_v<T, StateHandle>) {
@@ -598,6 +612,16 @@ public:
         return *this;
     }
 
+    /// @brief Adds a transition that defines `from->to` whenever \p event is sent to this FSM, and the \p to state is located in another FSM.
+    /// @details After this function is called, whenever the current state is \p from, and the FSM
+    /// receives an event with the Id \p event, then it will automatically transition the current state
+    /// to \p to before execution resumes. Both internally generated and externally generated events
+    /// will trigger this transition. The originating FSM will become inactive, and the remote FSM 
+    /// will become active.\n
+    /// The combination of (from, event) forms a unique transition. If such a transition already exists,
+    /// then its target \p to will be replaced. This unique table is shared with non-remote transitions.
+    /// @warning \p remote_fsm is not aware of such a remote transition existing. Therefore, this transition
+    /// may become dangling if \p remote_fsm is moved or destroyed.
     template<typename DStateId, typename DEventId>
     FSM& AddRemoteTransition(HandleOrId from, EventId event, FSM<DStateId, DEventId>& remote_fsm, DStateId to) {
         static_assert(std::is_same_v<EventId, DEventId>, "Remote transition must provide EventId translation if the types do not match.");
@@ -630,13 +654,6 @@ public:
 
         return *this;
     }
-
-    // // Adds transition from state 'from' to state 'to' on event 'onEvent' which lives in FSM 'targetFSM'.
-    // // targetFSM==nullptr means this FSM, so the 4th argument can be omitted if every state
-    // // refers to the same FSM.
-    // // Returns true if {from, onEvent} pair has not been routed previously.
-    // // Returns false if an existing destination is replaced with '{to, targetFSM}'.
-    // // Typically should return true unless you deliberately modify the state machine on the fly.
 
     // TODO: readd remove transition
     // Removes transition triggered by event 'onEvent' sent from 'fromState'.
@@ -682,6 +699,9 @@ public:
     //     return targetState(FindHandle(fromState), onEvent);
     // }
 
+    /// @brief Awaitable type used by @link FSM::EmitAndReceive @endlink
+    /// @details This type is automatically managed by C++20 Coroutines, and its definition
+    /// is not relevant for end-users of this library.
     struct EmitReceiveAwaitable {
         FSM* self;
         Event_t* event_return{};
@@ -720,14 +740,27 @@ public:
 
     friend struct EmitReceiveAwaitable;
 
-    EmitReceiveAwaitable EmitAndReceive(Event_t& e) {
-        m_event_for_next_resume = std::move(e);
-        return EmitReceiveAwaitable{this, &e};
+    /// @brief Can be awaited from a State coroutine to send an event to this FSM whilst suspending the State until an event is sent to it.
+    /// @details If \p event is empty, this FSM will be suspended. 
+    /// Else, if (current state, \p event) is in the transition table, it will transition to the target state.
+    /// Else, if no transition was found, an exception will be thrown. If you wish to send events
+    /// to the same current state, use AddTransition to create a circular transition.
+    /// @param event The event to be sent and eventually received. It will be transparently replaced with the received event.
+    /// @exception std::runtime_error Thrown when \p event is not empty but (current state, \p event)
+    /// is not found in the transition table.
+    EmitReceiveAwaitable EmitAndReceive(Event_t& event) {
+        m_event_for_next_resume = std::move(event);
+        return EmitReceiveAwaitable{this, &event};
     }
 
     // A simplified form of EmitAndReceive that only waits for an event,
     // and does not have the emission logic needed for transmission.
     // Uses an out parameter instead of a return.
+    
+
+    /// @brief Awaitable type used by @link FSM::ReceiveEvent @endlink
+    /// @details This type is automatically managed by C++20 Coroutines, and its definition
+    /// is not relevant for end-users of this library.
     struct ReceiveAwaitable {
         FSM* self;
         Event_t* event_return;
@@ -751,19 +784,20 @@ public:
 
     friend struct ReceiveAwaitable;
 
-    // Returns an awaitable which gives the next event sent to the awaiting state coroutine.
-    // This takes an out parameter to allow for reuse of the Event object.
-    ReceiveAwaitable ReceiveEvent(Event_t& out) {
-        out.Clear(); // Clear the previous event
+    /// @brief Can be awaited from a State coroutine to suspend it until an event is sent to it.
+    /// @param[out] event_out Where the received Event will be written to
+    /// @details The use of an out-parameter here allows for the Event's storage to be reused.
+    ReceiveAwaitable ReceiveEvent(Event_t& event_out) {
+        event_out.Clear(); // Clear the previous event
         // Bring the storage for the Event into the FSM so it can be reused by the next
-        // call to SendEvent or EmitAndReceive
-        m_event_for_next_resume = std::move(out);
-        return ReceiveAwaitable{this, &out};
+        // call to InsertEvent or EmitAndReceive
+        m_event_for_next_resume = std::move(event_out);
+        return ReceiveAwaitable{this, &event_out};
     }
     
-    // A simplified form of EmitAndReceive that only waits for an event,
-    // and does not have the emission logic needed for transmission.
-    // Uses a return instead of an out parameter.
+    /// @brief Awaitable type used by @link FSM::ReceiveInitialEvent @endlink
+    /// @details This type is automatically managed by C++20 Coroutines, and its definition
+    /// is not relevant for end-users of this library.
     struct InitialReceiveAwaitable {
         FSM* self;
 
@@ -785,13 +819,18 @@ public:
 
     friend struct InitialReceiveAwaitable;
 
+    /// @brief Can be awaited from a State coroutine to suspend it until an event is sent to it.
+    /// @warning This function should not be used if an Event variable already exists within the state,
+    /// as Event storage cannot be reused when it is returned from the await expression.
+    /// Improper usage of this function will cause calls to InsertEvent to unnecessarily allocate memory.
+    /// @return When this function call is awaited, it will return the received Event.
     InitialReceiveAwaitable ReceiveInitialEvent() {
         return InitialReceiveAwaitable{this};
     }
-
     
-    // Waits for an event and discards its contents whilst allowing for 
-    // storage reuse
+    /// @brief Awaitable type used by @link FSM::IgnoreEvent @endlink
+    /// @details This type is automatically managed by C++20 Coroutines, and its definition
+    /// is not relevant for end-users of this library.
     struct IgnoreAwaitable {
         FSM* self;
 
@@ -813,14 +852,16 @@ public:
 
     friend struct IgnoreAwaitable;
 
-    // Waits for an event and discards its contents whilst allowing for 
-    // storage reuse
+    /// @brief Can be awaited from a State coroutine to ignore the next event sent to this state, suspending
+    /// until it is received.
     IgnoreAwaitable IgnoreEvent() {
         return IgnoreAwaitable{this};
     }
 
     // Adds a state to the state machine without associating any events with it.
     // Returns the index of the vector to which the state was stored.
+    /// @brief Adds a state to the FSM.
+    /// @details See State for details on how one should be created.
     FSM& AddState(State_t&& state) {
         // TODO: readd
         // if (hasState(state.Name()))
@@ -844,6 +885,16 @@ public:
     // If (current state, event id) is in the transition table,
     // then it is sent to the next_state as defined by the transition.
     // Else, it is sent to the current_state.
+    /// @brief Sends an event to a suspended FSM, potentially triggering a transition.
+    /// @details If (cur state, event id) exists in the transition table, then a transition
+    /// will be triggered to the target state and the event will be sent to that state and resume.
+    /// Otherwise, the event is sent to the current state and it is resumed.\n\n
+    /// <b>Exception Safety</b>: If an exception escapes any of the states eventually resumed
+    /// by this function call, that State will be marked "abominable", then the exception will
+    /// be rethrown from that call. The abominable state should be removed and readded before
+    /// it is resumed, otherwise it results in undefined behavior.
+    /// @exception std::runtime_error Thrown if this function is called while the FSM is active.
+    /// @todo Detect no current state and abominable states in resumption
     FSM& InsertEvent(Event_t&& e) {
         // Store the event in the FSM, which will get moved by the next Awaitable resumed
         m_event_for_next_resume = std::move(e);
@@ -879,20 +930,21 @@ public:
         return std::ranges::find(m_states, id, &State_t::Id) != m_states.end();
     }
 
+    /// @brief Returns a range that contains all abominable states.
     auto GetAbominableStates() const {
         return m_states | std::views::filter([](const State_t& s) {
             return s.IsAbominable();
         });
     }
 
+    /// @brief Removes all states marked as abominable.
     void RemoveAbominableStates() {
         std::erase_if(m_states, [](const State_t& s) {
             return s.IsAbominable();
         });
     }
 
-    // Returns true if the FSM is running and false if all states
-    // are suspended and waiting for an event.
+    /// @brief Returns true if any State coroutine is currently running.
     bool IsActive() const { return m_is_fsm_active; }
 
 
@@ -1051,7 +1103,6 @@ private:
     // That is, an event sent from from-state will be routed to to-state.
     std::unordered_map<PartialTransition, TransitionTarget, PartialTransitionHash> m_transition_table;
 
-    // All coroutines which represent the states in the state machine
     std::vector<State_t> m_states;
 
     // True if the FSM is running, false if suspended.
