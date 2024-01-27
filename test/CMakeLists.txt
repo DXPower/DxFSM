@@ -6,6 +6,7 @@ target_sources(dxfsm_tests PRIVATE
     collatz.cpp
     event.cpp
     remote.cpp
+    resets.cpp
 )
 
 target_link_libraries(dxfsm_tests PRIVATE dxfsm Catch2::Catch2WithMain)
