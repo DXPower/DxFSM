@@ -720,11 +720,11 @@ public:
                 return std::noop_coroutine();
             }
 
-            const Transitioner* transitioner = self->IsResetting()
-                ? self->m_transition_after_reset
+            const Transitioner& transitioner = self->IsResetting()
+                ? *self->m_transition_after_reset
                 : self->GetTransitioner(pending_event);
 
-            if (transitioner == nullptr) {
+            if (transitioner.IsNull()) {
                 throw std::runtime_error(std::format(
                     "FSM '{}' can't find transition from state '{}' for given event. Please fix the transition table",
                     self->Name(), self->FindState(from_state.promise().id)->Name()
@@ -738,7 +738,7 @@ public:
                 self->m_state_to_reset = nullptr;
             }
 
-            return transitioner->Perform(*self);
+            return transitioner.Perform(*self);
         }
 
         void await_resume() {
@@ -790,18 +790,18 @@ public:
                 return std::noop_coroutine();
             }
             
-            const Transitioner* transitioner = self->IsResetting()
-                ? self->m_transition_after_reset
+            const Transitioner& transitioner = self->IsResetting()
+                ? *self->m_transition_after_reset
                 : self->GetTransitioner(pending_event);
 
-            if (transitioner == nullptr) {
+            if (transitioner.IsNull()) {
                 throw std::runtime_error(std::format(
                     "FSM '{}' can't find transition from state '{}' for given event. Please fix the transition table",
                     self->Name(), self->FindState(from_state.promise().id)->Name()
                 ));
             }
 
-            return transitioner->Perform(*self);
+            return transitioner.Perform(*self);
         }
 
         [[nodiscard]] ShouldReset await_resume() {
@@ -966,32 +966,18 @@ public:
         m_event_for_next_resume = std::move(e);
 
         // Treat this event as one that could change the state
-        const Transitioner* potential_transition = GetTransitioner(m_event_for_next_resume);
-        std::coroutine_handle<> state_to_resume{};
+        const Transitioner& potential_transition = GetTransitioner(m_event_for_next_resume);
+        std::coroutine_handle<> state_to_resume = potential_transition.Perform(*this);
     
-        if (potential_transition != nullptr) {
-            state_to_resume = potential_transition->Perform(*this);
-        } else {
-            // No transition found, send to the current state
-            state_to_resume = _state;
-        }
-
         // If an exception is thrown while the state is running, catch it to 
         // always cleanup
         try {
             state_to_resume.resume();
         } catch (...) {
-            // TODO: Keep a state waiting for reset in its resettable-position
-            // if the exception isn't thrown from it.
+            // TODO: Clear these variables properly w/ remote transitions
             m_transition_after_reset = nullptr;
             m_state_to_reset = nullptr;
-
-            if (potential_transition != nullptr) {
-                potential_transition->ReportDone(*this, true);
-            } else {
-                m_is_fsm_active = false;
-                _state = nullptr;
-            }
+            potential_transition.ReportDone(*this, true);
 
             throw;
         }
@@ -1116,10 +1102,14 @@ private:
     struct RemoteTransition {
         RemoteTransitionTargetPtr remote_target{};
     };
+
+    struct NullTransition { };
+
     class Transitioner {
-        std::variant<LocalTransition, RemoteTransition> m_data{};
+        std::variant<LocalTransition, RemoteTransition, NullTransition> m_data{};
 
     public:
+        Transitioner(NullTransition) : m_data(std::in_place_type<NullTransition>) { }
         Transitioner(LocalTransition local) : m_data(local) { }
         Transitioner(RemoteTransition&& remote) : m_data(std::move(remote)) { }
 
@@ -1138,16 +1128,18 @@ private:
                         originating._state = StateHandle::from_address(local.state_to_resume.address());
                         return local.state_to_resume;
                     }
-                } else if constexpr(std::is_same_v<T, RemoteTransition>) {
+                } else if constexpr (std::is_same_v<T, RemoteTransition>) {
                     const RemoteTransitionTargetBase& remote = *o.remote_target;
                     return remote.TransitionOnRemote(originating);
+                } else if constexpr(std::is_same_v<T, NullTransition>) {
+                    return originating._state;
                 }
             }, m_data);
         }
 
         void ReportDone(FSM& originating, bool nullify_current_state) const {
             return std::visit([&originating, nullify_current_state]<typename T>(const T& o) {
-                if constexpr (std::is_same_v<T, LocalTransition>) {
+                if constexpr (std::is_same_v<T, LocalTransition> || std::is_same_v<T, NullTransition>) {
                     if (nullify_current_state) {
                         originating._state = nullptr;
                     }
@@ -1164,13 +1156,17 @@ private:
         bool IsRemote() const {
             return std::holds_alternative<RemoteTransition>(m_data);
         }
+
+        bool IsNull() const {
+            return std::holds_alternative<NullTransition>(m_data);
+        }
     };
 
-    const Transitioner* GetTransitioner(const Event_t& event) const noexcept {
+    const Transitioner& GetTransitioner(const Event_t& event) const noexcept {
         if (auto it = m_transition_table.find({_state, event.GetId()}); it != m_transition_table.end())
-            return &it->second;
+            return it->second;
         else
-            return nullptr; // No coded state transition, return empty handle to signify this
+            return null_transition; // No coded state transition, return null transition
     }
 
     // The 'from' and 'event' of a transition
@@ -1231,6 +1227,9 @@ private:
     std::vector<State_t> m_states;
     StateHandle m_state_to_reset{};
     const Transitioner* m_transition_after_reset{};
+
+    // Shared null_transition instance
+    inline static const Transitioner null_transition{NullTransition{}};
 
     // True if the FSM is running, false if suspended.
     bool m_is_fsm_active{};
