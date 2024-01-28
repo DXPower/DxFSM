@@ -68,26 +68,26 @@ namespace {
 
         State_t Cycler(FSM_t& fsm, StateId state_id) {
             Event_t event = co_await fsm.ReceiveInitialEvent();
-            ShouldReset should_reset{};
+            ResetToken reset_token{};
 
             while (true) {
             Escape:
                 for (StageId stage_id : {StageId::A, StageId::B, StageId::C, StageId::D}) {
-                    if (should_reset == ShouldReset::Yes) {
+                    if (reset_token) {
                         if (throw_on_reset)
                             throw std::runtime_error("Exception during reset");
 
-                        should_reset = ShouldReset::No;
+                        reset_token = {};
                         event.Store(EventId::InnerStep, -1);
                         goto Escape;
                     } else if (event == EventId::InnerStep || event == EventId::OuterStep) {
                         stages.push_back({state_id, stage_id, event.Get<int>()});
                         event.Clear();
-                        should_reset = co_await fsm.EmitAndReceiveResettable(event);
+                        reset_token = co_await fsm.EmitAndReceiveResettable(event);
                     } else if (event == EventId::InnerNext) {
                         // This will trigger a transition to another state and thus a reset
                         event.Store(EventId::OuterStep, 0xFACE);
-                        should_reset = co_await fsm.EmitAndReceiveResettable(event);
+                        reset_token = co_await fsm.EmitAndReceiveResettable(event);
                     } else if (event == EventId::Throw) {
                         throw std::runtime_error(event.Get<std::string>());
                     }

@@ -519,8 +519,20 @@ namespace detail {
     };
 }
 
-enum class ShouldReset {
-    No, Yes
+class ResetToken {
+    bool m_should_reset{};
+
+public:
+    constexpr ResetToken() noexcept = default;
+    constexpr ResetToken(bool should_reset) noexcept : m_should_reset(should_reset) { }
+
+    constexpr bool ShouldReset() const noexcept {
+        return m_should_reset;
+    }
+
+    constexpr operator bool() const noexcept {
+        return m_should_reset;
+    }
 };
 
 /// @brief The core class for representing a Finite State Machine
@@ -731,13 +743,6 @@ public:
                 ));
             }
 
-            if (self->IsResetting()) {
-                // If we get here while resetting, the reset is complete and the state
-                // has suspended. Clear the reset info.
-                self->m_transition_after_reset = nullptr;
-                self->m_state_to_reset = nullptr;
-            }
-
             return transitioner.Perform(*self);
         }
 
@@ -762,11 +767,12 @@ public:
             throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
         }
 
-        m_event_for_next_resume = std::move(event);
+        if (!IsResetting()) {
+            m_event_for_next_resume = std::move(event);
+        }
+
         return EmitReceiveAwaitable{this, &event};
     }
-
-    
 
     /// @brief Awaitable type used by @link FSM::EmitAndReceiveResettable @endlink
     /// @details This type is automatically managed by C++20 Coroutines, and its definition
@@ -774,11 +780,11 @@ public:
     struct EmitReceiveResettableAwaitable {
         FSM* self{};
         Event_t* event_return{};
-        ShouldReset should_reset{};
 
         constexpr bool await_ready() {return false;}
         std::coroutine_handle<> await_suspend(StateHandle from_state) {
             self->m_is_fsm_active = false;
+            self->m_state_to_reset = from_state;
 
             const Event_t& pending_event = self->m_event_for_next_resume;
             
@@ -786,7 +792,6 @@ public:
             // state as where the reset should be sent to on next resumption of the FSM
             // should a transition occur.
             if (pending_event.Empty() && !self->IsResetting()) {
-                self->m_state_to_reset = from_state;
                 return std::noop_coroutine();
             }
             
@@ -804,16 +809,16 @@ public:
             return transitioner.Perform(*self);
         }
 
-        [[nodiscard]] ShouldReset await_resume() {
-            self->m_is_fsm_active = true;
+        [[nodiscard]] ResetToken await_resume() {
+            auto reset_token = self->CommonResettableAwaitResume();
 
-            if (should_reset == ShouldReset::No && !self->ShouldResumeRespondWithReset()) {
-                *event_return = std::move(self->m_event_for_next_resume);
-                return ShouldReset::No;
-            } else {
+            if (reset_token.ShouldReset()) {
                 event_return->Clear();
-                return ShouldReset::Yes;
+            } else {
+                *event_return = std::move(self->m_event_for_next_resume);
             }
+
+            return reset_token;
         }
     };
 
@@ -824,7 +829,10 @@ public:
             throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
         }
 
-        m_event_for_next_resume = std::move(event);
+        if (!IsResetting()) {
+            m_event_for_next_resume = std::move(event);
+        }
+
         return EmitReceiveResettableAwaitable{this, &event};
     }
     
@@ -856,10 +864,12 @@ public:
     /// @param[out] event_out Where the received Event will be written to
     /// @details The use of an out-parameter here allows for the Event's storage to be reused.
     ReceiveAwaitable ReceiveEvent(Event_t& event_out) {
-        event_out.Clear(); // Clear the previous event
         // Bring the storage for the Event into the FSM so it can be reused by the next
         // call to InsertEvent or EmitAndReceive
-        m_event_for_next_resume = std::move(event_out);
+        if (!IsResetting()) {
+            event_out.Clear(); // Clear the previous event
+            m_event_for_next_resume = std::move(event_out);
+        }
         return ReceiveAwaitable{this, &event_out};
     }
     
@@ -1125,6 +1135,12 @@ private:
                         originating._state = originating.m_state_to_reset;
                         return originating.m_state_to_reset;
                     } else {
+                        // If we get here while resetting, that means the reset is done and can be cleared
+                        if (originating.IsResetting()) {
+                            originating.m_transition_after_reset = nullptr;
+                            originating.m_state_to_reset = nullptr;
+                        }
+
                         originating._state = StateHandle::from_address(local.state_to_resume.address());
                         return local.state_to_resume;
                     }
@@ -1218,6 +1234,44 @@ private:
         m_state_to_reset = nullptr;
 
         return transitioner->Perform(*this);
+    }
+
+    // If currently resetting, this will resume the stored post-reset transition.
+    // Else, it will suspend entirely.
+    std::coroutine_handle<> CommonEmittingAwaitSuspend() {
+        m_is_fsm_active = false;
+
+        const Event_t& pending_event = m_event_for_next_resume;
+        
+        // If this state sends an empty event and we're not resetting,
+        // then suspend the FSM
+        if (pending_event.Empty() && !IsResetting()) {
+            return std::noop_coroutine();
+        }
+
+        const Transitioner& transitioner = IsResetting()
+            ? m_transition_after_reset
+            : GetTransitioner(pending_event);
+
+        if (transitioner.IsNull()) {
+            throw std::runtime_error(std::format(
+                "FSM '{}' can't find transition from state '{}' for given event. Please fix the transition table",
+                Name(), FindState(_state.promise().id)->Name()
+            ));
+        }
+
+        return transitioner.Perform(*this);
+    }
+
+    ResetToken CommonResettableAwaitResume() {
+        m_is_fsm_active = true;
+
+        if (ShouldResumeRespondWithReset()) {
+            return true;
+        } else {
+            m_state_to_reset = nullptr;
+            return false;
+        }
     }
 
     // Transition table in format {from-state, event} -> to-state
