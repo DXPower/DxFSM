@@ -721,29 +721,8 @@ public:
         Event_t* event_return{};
 
         constexpr bool await_ready() {return false;}
-        std::coroutine_handle<> await_suspend(StateHandle from_state) {
-            self->m_is_fsm_active = false;
-
-            const Event_t& pending_event = self->m_event_for_next_resume;
-            
-            // If this state sends an empty event and we're not resetting,
-            // then suspend the FSM
-            if (pending_event.Empty() && !self->IsResetting()) {
-                return std::noop_coroutine();
-            }
-
-            const Transitioner& transitioner = self->IsResetting()
-                ? *self->m_transition_after_reset
-                : self->GetTransitioner(pending_event);
-
-            if (transitioner.IsNull()) {
-                throw std::runtime_error(std::format(
-                    "FSM '{}' can't find transition from state '{}' for given event. Please fix the transition table",
-                    self->Name(), self->FindState(from_state.promise().id)->Name()
-                ));
-            }
-
-            return transitioner.Perform(*self);
+        std::coroutine_handle<> await_suspend(StateHandle) {
+            return self->CommonEmittingAwaitSuspend();
         }
 
         void await_resume() {
@@ -783,30 +762,8 @@ public:
 
         constexpr bool await_ready() {return false;}
         std::coroutine_handle<> await_suspend(StateHandle from_state) {
-            self->m_is_fsm_active = false;
             self->m_state_to_reset = from_state;
-
-            const Event_t& pending_event = self->m_event_for_next_resume;
-            
-            // If this state emits an empty event, then we need to save the current
-            // state as where the reset should be sent to on next resumption of the FSM
-            // should a transition occur.
-            if (pending_event.Empty() && !self->IsResetting()) {
-                return std::noop_coroutine();
-            }
-            
-            const Transitioner& transitioner = self->IsResetting()
-                ? *self->m_transition_after_reset
-                : self->GetTransitioner(pending_event);
-
-            if (transitioner.IsNull()) {
-                throw std::runtime_error(std::format(
-                    "FSM '{}' can't find transition from state '{}' for given event. Please fix the transition table",
-                    self->Name(), self->FindState(from_state.promise().id)->Name()
-                ));
-            }
-
-            return transitioner.Perform(*self);
+            return self->CommonEmittingAwaitSuspend();            
         }
 
         [[nodiscard]] ResetToken await_resume() {
@@ -1237,7 +1194,7 @@ private:
     }
 
     // If currently resetting, this will resume the stored post-reset transition.
-    // Else, it will suspend entirely.
+    // Else, it will check the pending event and perform its transitioner
     std::coroutine_handle<> CommonEmittingAwaitSuspend() {
         m_is_fsm_active = false;
 
@@ -1250,7 +1207,7 @@ private:
         }
 
         const Transitioner& transitioner = IsResetting()
-            ? m_transition_after_reset
+            ? *m_transition_after_reset
             : GetTransitioner(pending_event);
 
         if (transitioner.IsNull()) {
