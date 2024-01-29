@@ -4,6 +4,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_vector.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 using namespace dxfsm;
 
@@ -111,24 +112,41 @@ TEST_CASE("Resettable States", "[advanced][resets]") {
     int counter = 2;
 
     CHECK(resets.CurrentStage() == Stage{"One", A, 1});
+    resets.fsm.InsertEvent(Event(EventId::InnerStep, counter++));
+    resets.fsm.InsertEvent(Event(EventId::InnerStep, counter++));
+    CHECK(resets.CurrentStage() == Stage{"One", C, 3});
 
-    SECTION("Externally triggered reset") {
-        SECTION("State One") {
-            resets.fsm.InsertEvent(Event(EventId::InnerStep, counter++));
-            resets.fsm.InsertEvent(Event(EventId::InnerStep, counter++));
+    resets.fsm.InsertEvent(Event(EventId::OuterStep, counter++));
+    CHECK(resets.fsm.GetCurrentState()->Id() == "Two");
 
-            CHECK(resets.CurrentStage() == Stage{"One", C, 3});
 
-            resets.fsm.InsertEvent(Event(EventId::OuterStep, counter++));
+    resets.fsm.InsertEvent(Event(EventId::InnerStep, counter++));
+    resets.fsm.InsertEvent(Event(EventId::OuterStep, counter++));
 
-            CHECK_THAT(resets.stages, Catch::Matchers::Equals(std::vector{
-                Stage{"One", A, 1},
-                Stage{"One", B, 2},
-                Stage{"One", C, 3},
-                Stage{"One", A, -1},
-                Stage{"Two", A, 4},
-            }));
+    CHECK_THAT(resets.stages, Catch::Matchers::Equals(std::vector{
+        Stage{"One", A, 1},
+        Stage{"One", B, 2},
+        Stage{"One", C, 3},
+        Stage{"One", A, -1},
+        Stage{"Two", A, 4},
+        Stage{"Two", B, 5},
+        Stage{"Two", A, -1},
+        Stage{"Three", A, 6},
+    }));
 
-        }
-    }
+    resets.throw_on_reset = true;
+
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(resets.fsm.InsertEvent(Event(EventId::OuterStep, counter++)), ContainsSubstring("Exception during reset"));
+
+    std::vector<const State_t*> failed_states{};
+    std::ranges::copy(resets.fsm.GetAbominableStates() | std::views::transform([](const auto& s) {
+        return &s;
+    }), std::back_inserter(failed_states));
+
+    CHECK(resets.fsm.GetCurrentState() == nullptr);
+    REQUIRE(failed_states.size() == 1);
+    CHECK(failed_states[0]->IsAbominable());
+    CHECK(failed_states[0]->Id() == "Three");
+    CHECK(failed_states[0]->Name() == "ThreeState");
 }
