@@ -37,7 +37,7 @@ namespace {
                .AddTransition(off_state, EventId::CycleIn, on_state);
 
             // Start the FSM by bringing it into the off state
-            fsm.SetCurrentState(on_state).InsertEvent(Event(EventId::CycleIn));
+            fsm.SetCurrentState(on_state).InsertEvent(EventId::CycleIn);
         }
 
         State StateOn(FSM& fsm, StateId id) {
@@ -78,10 +78,10 @@ TEST_CASE("Light Local Test") {
     light.current_brightness = 37;
 
     using EventId = Light_t::EventId;
-    light.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn));
-    light.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn));
-    light.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn));
-    light.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn));
+    light.fsm.InsertEvent(EventId::CycleIn);
+    light.fsm.InsertEvent(EventId::CycleIn);
+    light.fsm.InsertEvent(EventId::CycleIn);
+    light.fsm.InsertEvent(EventId::CycleIn);
 
     CHECK_THAT(light.light_sequence, Catch::Matchers::Equals(std::vector({0, 37, 0, 37, 0})));
     CHECK(light.fsm.GetCurrentState()->Id() == "StateOff");
@@ -110,8 +110,8 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK(green.fsm.GetCurrentState()->Name() == "GreenOff");
         CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
 
-        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
-        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 50)); // Sends 50 brightness to green
+        red.fsm.InsertEvent(EventId::CycleIn); // Turns red on
+        red.fsm.InsertEvent([](auto& ev) { ev.Store(EventId::CycleOut, 50); }); // Sends 50 brightness to green
 
         CHECK(red.current_brightness == 64);
         CHECK(green.current_brightness == 50);
@@ -120,11 +120,11 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
         CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
 
-        green.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns green off
-        green.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns green on
-        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red off
-        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
-        green.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 75)); // Sends 75 brightness to blue
+        green.fsm.InsertEvent(EventId::CycleIn); // Turns green off
+        green.fsm.InsertEvent(EventId::CycleIn); // Turns green on
+        red.fsm.InsertEvent(EventId::CycleIn); // Turns red off
+        red.fsm.InsertEvent(EventId::CycleIn); // Turns red on
+        green.fsm.InsertEvent([](auto& ev) { ev.Store(EventId::CycleOut, 75); }); // Sends 75 brightness to blue
 
         CHECK(red.current_brightness == 64);
         CHECK(green.current_brightness == 50);
@@ -133,7 +133,7 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
         CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOn");
 
-        blue.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 49)); // Sends 49 brightness to red
+        blue.fsm.InsertEvent([](auto& ev) { ev.Store(EventId::CycleOut, 49); }); // Sends 49 brightness to red
 
         CHECK(red.current_brightness == 49);
         CHECK(green.current_brightness == 50);
@@ -142,8 +142,8 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
         CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOn");
 
-        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red off
-        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
+        red.fsm.InsertEvent(EventId::CycleIn); // Turns red off
+        red.fsm.InsertEvent(EventId::CycleIn); // Turns red on
 
         CHECK_THAT(red.light_sequence, Catch::Matchers::Equals(std::vector({0, 64, 0, 64, 49, 0, 49})));
         CHECK_THAT(green.light_sequence, Catch::Matchers::Equals(std::vector({0, 50, 0, 50})));
@@ -151,8 +151,8 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
     }
 
     SECTION("Exception Safety") {
-        red.fsm.InsertEvent(dxfsm::Event(EventId::CycleIn)); // Turns red on
-        CHECK_THROWS_WITH(red.fsm.InsertEvent(dxfsm::Event(EventId::CycleOut, 0xDEAD)), "DEAD!");
+        red.fsm.InsertEvent(EventId::CycleIn); // Turns red on
+        CHECK_THROWS_WITH(red.fsm.InsertEvent([](auto& ev) { ev.Store(EventId::CycleOut, 0xDEAD); }), "DEAD!");
 
         auto CheckFailedStates = [&]<typename S, typename E>(const dxfsm::FSM<S, E>& fsm, std::string_view expected_id = "") {
             std::vector<const dxfsm::State<S>*> failed_states{};

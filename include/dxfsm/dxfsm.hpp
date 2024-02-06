@@ -1,6 +1,7 @@
 #ifndef DXFSM_HPP
 #define DXFSM_HPP
 
+#include <concepts>
 #include <coroutine>
 #include <memory>
 #include <string_view>
@@ -914,23 +915,22 @@ public:
 
     std::size_t NumStates() const { return m_states.size(); }
 
-    // Kick off a suspended state machine by sending an event.
-    // If (current state, event id) is in the transition table,
-    // then it is sent to the next_state as defined by the transition.
-    // Else, it is sent to the current_state.
     /// @brief Sends an event to a suspended FSM, potentially triggering a transition.
     /// @details If (cur state, event id) exists in the transition table, then a transition
     /// will be triggered to the target state and the event will be sent to that state and resume.
     /// Otherwise, the event is sent to the current state and it is resumed.\n\n
+    /// \p event_initializer is called with a reference to the stored event object.
+    /// The callable should use Event's member functions to set the id or store data.
+    /// If the event is empty after returning, then the FSM will not be resumed;
+    /// this can be used to reserve space in the stored event without triggering resumption.\n\n
     /// <b>Exception Safety</b>: If an exception escapes any of the states eventually resumed
     /// by this function call, that State will be marked "abominable", then the exception will
     /// be rethrown from that call. The abominable state should be removed and readded before
     /// it is resumed, otherwise it results in undefined behavior.
-    /// @exception std::runtime_error Thrown if this function is called while the FSM is active.
     /// @todo Detect no current state and abominable states in resumption
-    FSM& InsertEvent(Event_t&& e) {
-        // Store the event in the FSM, which will get moved by the next Awaitable resumed
-        m_event_for_next_resume = std::move(e);
+    template<std::invocable<Event_t&> F>
+    FSM& InsertEvent(F&& event_initializer) {
+        std::forward<F>(event_initializer)(m_event_for_next_resume);
 
         // Treat this event as one that could change the state
         const Transitioner& potential_transition = GetTransitioner(m_event_for_next_resume);
@@ -952,6 +952,32 @@ public:
         return *this;
     }
 
+    /// \brief Shortcut for the function overload of InsertEvent which sets the Id of
+    /// the event without storing associated data.
+    FSM& InsertEvent(EventId id)  {
+        return InsertEvent([&id](Event_t& ev) {
+            ev.Store(std::move(id));
+        });
+    }
+
+    /// \brief Shortcut for the function overload of InsertEvent which sets the Id of
+    /// the event and stores associated data
+    template<typename T>
+    FSM& InsertEvent(EventId id, T&& obj) {
+        return InsertEvent([&id, &obj](Event_t& ev) {
+            ev.Store(std::move(id), std::forward<T>(obj));
+        });
+    }
+
+    /// \brief Shortcut for the function overload of InsertEvent which sets the Id of
+    /// the event and constructs the associated data in-place
+    template<typename T, typename... Args>
+    FSM& EmplaceEvent(EventId id, Args&&... args) {
+        return InsertEvent([&id, &args...](Event_t& ev) {
+            ev.template Emplace<T>(std::move(id), std::forward<Args>(args)...);
+        });
+    }
+
     bool HasState(StateId id) const {
         return std::ranges::find(m_states, id, &State_t::Id) != m_states.end();
     }
@@ -968,6 +994,19 @@ public:
         std::erase_if(m_states, [](const State_t& s) {
             return s.IsAbominable();
         });
+    }
+
+    /// @brief Moves out the stored Event object within the FSM
+    /// @details In most cases, this will be an empty event object with
+    /// a non-zero capacity. However, this event may be non-empty if 
+    /// a State never received the event due to an uncaught exception.
+    Event_t ExtractStoredEvent() {
+        return std::move(m_event_for_next_resume);
+    }
+
+    /// @brief Resends a stored Event 
+    void ResendStoredEvent() {
+        InsertEvent(std::move(m_event_for_next_resume));
     }
 
     /// @brief Returns true if any State coroutine is currently running.

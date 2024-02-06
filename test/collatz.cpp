@@ -144,7 +144,7 @@ TEST_CASE("Collatz FSM", "[basic]") {
     CollatzFsm collatz{};
 
     CollatzFsm::Event_t event(EventId::Start, 15);
-    collatz.fsm.InsertEvent(std::move(event));
+    collatz.fsm.InsertEvent(EventId::Start, 15);
 
     CHECK_FALSE(collatz.fsm.IsActive());
 
@@ -170,9 +170,11 @@ TEST_CASE("Collatz FSM Exceptions", "[advanced][exceptions]") {
         invalid_value = -37;
     }
 
-    Event e(EventId::Start, invalid_value);
-
-    CHECK_THROWS_MATCHES(collatz.fsm.InsertEvent(std::move(e)), InvalidValue, InvalidValueMatcher(invalid_value));
+    CHECK_THROWS_MATCHES(
+        collatz.fsm.InsertEvent(EventId::Start, invalid_value),
+        InvalidValue, 
+        InvalidValueMatcher(invalid_value)
+    );
     CHECK_FALSE(collatz.fsm.IsActive());
 
     std::vector<const CollatzFsm::State_t*> failed_states{};

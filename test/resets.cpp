@@ -64,7 +64,7 @@ namespace {
                 .AddTransition("Two", EventId::OuterStep, "Three")
                 .AddTransition("Three", EventId::OuterStep, "One");
 
-            fsm.SetCurrentState("One").InsertEvent(Event(EventId::InnerStep, 1));
+            fsm.SetCurrentState("One").InsertEvent(EventId::InnerStep, 1);
         }
 
         State_t Cycler(FSM_t& fsm, StateId state_id) {
@@ -112,16 +112,16 @@ TEST_CASE("Resettable States", "[advanced][resets]") {
     int counter = 2;
 
     CHECK(resets.CurrentStage() == Stage{"One", A, 1});
-    resets.fsm.InsertEvent(Event(EventId::InnerStep, counter++));
-    resets.fsm.InsertEvent(Event(EventId::InnerStep, counter++));
+    resets.fsm.InsertEvent(EventId::InnerStep, counter++);
+    resets.fsm.InsertEvent(EventId::InnerStep, counter++);
     CHECK(resets.CurrentStage() == Stage{"One", C, 3});
 
-    resets.fsm.InsertEvent(Event(EventId::OuterStep, counter++));
+    resets.fsm.InsertEvent(EventId::OuterStep, counter++);
     CHECK(resets.fsm.GetCurrentState()->Id() == "Two");
 
 
-    resets.fsm.InsertEvent(Event(EventId::InnerStep, counter++));
-    resets.fsm.InsertEvent(Event(EventId::OuterStep, counter++));
+    resets.fsm.InsertEvent(EventId::InnerStep, counter++);
+    resets.fsm.InsertEvent(EventId::OuterStep, counter++);
 
     CHECK_THAT(resets.stages, Catch::Matchers::Equals(std::vector{
         Stage{"One", A, 1},
@@ -137,7 +137,10 @@ TEST_CASE("Resettable States", "[advanced][resets]") {
     resets.throw_on_reset = true;
 
     using Catch::Matchers::ContainsSubstring;
-    CHECK_THROWS_WITH(resets.fsm.InsertEvent(Event(EventId::OuterStep, counter++)), ContainsSubstring("Exception during reset"));
+    CHECK_THROWS_WITH(
+        resets.fsm.InsertEvent(EventId::OuterStep, counter++),
+        ContainsSubstring("Exception during reset")
+    );
 
     std::vector<const State_t*> failed_states{};
     std::ranges::copy(resets.fsm.GetAbominableStates() | std::views::transform([](const auto& s) {
