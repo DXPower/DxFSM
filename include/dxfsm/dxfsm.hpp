@@ -927,7 +927,7 @@ public:
     /// by this function call, that State will be marked "abominable", then the exception will
     /// be rethrown from that call. The abominable state should be removed and readded before
     /// it is resumed, otherwise it results in undefined behavior.
-    /// @todo Detect no current state and abominable states in resumption
+    /// @todo Detect no current state, empty event, and abominable states in resumption
     template<std::invocable<Event_t&> F>
     FSM& InsertEvent(F&& event_initializer) {
         std::forward<F>(event_initializer)(m_event_for_next_resume);
@@ -941,11 +941,7 @@ public:
         try {
             state_to_resume.resume();
         } catch (...) {
-            // TODO: Clear these variables properly w/ remote transitions
-            m_transition_after_reset = nullptr;
-            m_state_to_reset = nullptr;
             potential_transition.ReportDone(*this, true);
-
             throw;
         }
 
@@ -999,14 +995,29 @@ public:
     /// @brief Moves out the stored Event object within the FSM
     /// @details In most cases, this will be an empty event object with
     /// a non-zero capacity. However, this event may be non-empty if 
-    /// a State never received the event due to an uncaught exception.
+    /// a State never received the event due to an uncaught exception
+    /// during an reset.
     Event_t ExtractStoredEvent() {
+        m_transition_after_reset = nullptr;
         return std::move(m_event_for_next_resume);
     }
 
-    /// @brief Resends a stored Event 
-    void ResendStoredEvent() {
-        InsertEvent(std::move(m_event_for_next_resume));
+    /// @brief Resends a stored Event, useful for recovering from an 
+    /// exception during a reset
+    /// @details Has no effect if there is no stored event.
+    /// @exception User-defined Has the same exception rules as @ref InsertEvent
+    bool ResendStoredEvent() {
+        if (m_event_for_next_resume.Empty() || m_transition_after_reset == nullptr)
+            return false;
+
+        try {
+            m_transition_after_reset->Perform(*this).resume();
+        } catch (...) {
+            m_transition_after_reset->ReportDone(*this, true);
+            throw;
+        }
+
+        return true;
     }
 
     /// @brief Returns true if any State coroutine is currently running.
@@ -1092,6 +1103,7 @@ private:
                 target_fsm->_state = nullptr;
             }
 
+            target_fsm->m_state_to_reset = nullptr;
             target_fsm->m_is_fsm_active = false;
         }
     };
@@ -1156,6 +1168,7 @@ private:
                         originating._state = nullptr;
                     }
 
+                    originating.m_state_to_reset = nullptr;
                     originating.m_is_fsm_active = false;
                 } else if constexpr(std::is_same_v<T, RemoteTransition>) {
                     const RemoteTransitionTargetBase& remote = *o.remote_target;
@@ -1215,7 +1228,7 @@ private:
         return m_state_to_reset != nullptr;
     }
 
-    // If currently resetting, this will resume the stored post-reset transition.
+    // If currently resetting, this will return the stored post-reset transition.
     // Else, it will suspend entirely.
     std::coroutine_handle<> CommonAwaitSuspend() {
         m_is_fsm_active = false;
@@ -1248,13 +1261,6 @@ private:
         const Transitioner& transitioner = IsResetting()
             ? *m_transition_after_reset
             : GetTransitioner(pending_event);
-
-        if (transitioner.IsNull()) {
-            throw std::runtime_error(std::format(
-                "FSM '{}' can't find transition from state '{}' for given event. Please fix the transition table",
-                Name(), FindState(_state.promise().id)->Name()
-            ));
-        }
 
         return transitioner.Perform(*this);
     }

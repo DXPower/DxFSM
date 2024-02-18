@@ -3,24 +3,24 @@ DxFSM is a C++20 header-only Finite State Machine library.
 
 This library was originally forked from [CoFSM](https://github.com/tirimatangi/CoFSM). Every line from the older library has been reanalyzed and rewritten for multiple reasons:
 - Transitioned the entire library from using strings as IDs to a templated user-provided type
+- Added resettable states (details below)
 - Simplified and optimized Event implementation, making it more type-safe and improved its usability
-- Removed unnecessary operator overloading ("cute syntax")
 - Significantly improved the public interfaces of State and FSM to make them simpler, easier to use, and more descriptive
-- Hardened multi-threaded operation and added several new functions to handle different use-cases (more to do)
 - Made the library exception safe (details below)
-- Fixed several bugs and implementation issues
+- Eliminated unnecessary allocations when externally triggering events
 - Improved optimization in the handling of coroutine frames
-- Generally refactored internal code to improve quality and maintainability
+- Fixed several bugs and implementation issues
 - Added tests to comprehensively show correct behavior and aide in further development
-
-Additionally, new features have been added (all are TODO):
-- **Event Queueing**: Thread-safely enqueue an event to be automatically inserted the next time the FSM suspends.
-This is useful for when state processing occurs in the background over an extended but finite period of time. For example, this can be used to send events to an FSM that handles application state, and different events can come from different threads, such as mouse clicks or timeouts.
-- **Event Channels**: Thread-safely enqueue events to an ID'ed channel that can be co-awaited with a timeout.
-This is useful if you want to send data to a state for it to eventually read, particularly for FSMs that never
-suspend processing on a background thread.
+- Removed incorrect multithreaded operation
+- Removed unnecessary operator overloading ("cute syntax")
+- Generally refactored internal code to improve quality and maintainability
 
 ------
+## Resettable States
+
+All of the FSM class's awaitables have an alternative to receive a reset token if a transition
+away from the current state occurs. 
+
 ## Exception Safety
 
 DxFSM is fully exception-safe and is able to recover from exceptions thrown out of a State coroutine.

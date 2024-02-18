@@ -67,8 +67,6 @@ struct CollatzFsm {
     }
 
     State_t StateStart(FSM_t& fsm, StateId id) {
-        std::cout << "Hello" << std::endl;
-
         // Specifically test using EmitAndReceive at beginning of loop
         Event_t event{};
 
