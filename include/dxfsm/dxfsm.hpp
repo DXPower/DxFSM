@@ -1,6 +1,7 @@
 #ifndef DXFSM_HPP
 #define DXFSM_HPP
 
+#include <concepts>
 #include <coroutine>
 #include <memory>
 #include <string_view>
@@ -519,6 +520,22 @@ namespace detail {
     };
 }
 
+class ResetToken {
+    bool m_should_reset{};
+
+public:
+    constexpr ResetToken() noexcept = default;
+    constexpr ResetToken(bool should_reset) noexcept : m_should_reset(should_reset) { }
+
+    constexpr bool ShouldReset() const noexcept {
+        return m_should_reset;
+    }
+
+    constexpr operator bool() const noexcept {
+        return m_should_reset;
+    }
+};
+
 /// @brief The core class for representing a Finite State Machine
 /// @details This class needs to be created first so it can be passed
 /// to the State coroutines when they are started.
@@ -604,9 +621,7 @@ public:
                 .from = from_handle,
                 .event = std::move(event)
             },
-            LocalTransitionTarget{
-                .state = to_handle
-            }
+            LocalTransition{to_handle}
         );
 
         return *this;
@@ -638,18 +653,18 @@ public:
         auto from_handle = std::visit(GetHandle, from);
         auto to_handle = remote_fsm.FindState(to)->handle();
 
-        auto target = std::make_unique<RemoteTransitionTarget<DStateId, DEventId>>();
-
-        target->target_fsm = &remote_fsm;
-        target->target_state_handle = to_handle;
-        target->translated_event_id = event;
+        auto target = std::make_unique<RemoteTransitionTarget<DStateId, DEventId>>(
+            remote_fsm,
+            to_handle,
+            event
+        );
 
         m_transition_table.emplace(
             PartialTransition{
                 .from = from_handle,
                 .event = std::move(event)
             },
-            std::move(target)
+            RemoteTransition{std::move(target)}
         );
 
         return *this;
@@ -703,37 +718,16 @@ public:
     /// @details This type is automatically managed by C++20 Coroutines, and its definition
     /// is not relevant for end-users of this library.
     struct EmitReceiveAwaitable {
-        FSM* self;
+        FSM* self{};
         Event_t* event_return{};
 
         constexpr bool await_ready() {return false;}
-        std::coroutine_handle<> await_suspend(StateHandle fromState) {
-            const Event_t& pending_event = self->m_event_for_next_resume;
-            
-            // If a state emits an empty event all states will remain suspended.
-            // Consequently, the FSM will stopped. It can be restarted by calling SendEvent()
-            if (pending_event.Empty()) {
-                self->m_is_fsm_active = false;
-                return std::noop_coroutine();
-            }
-
-            std::optional<TransitionResult> transition = self->PerformTransition();
-
-            if (!transition.has_value()) {
-                throw std::runtime_error(std::format(
-                    "FSM '{}' can't find transition from state '{}' for given event. Please fix the transition table",
-                    self->Name(), self->FindState(fromState.promise().id)->Name()
-                ));
-            }
-
-            if (transition->IsRemote()) {
-                self->m_is_fsm_active = false;
-            }
-
-            return transition->state_to_resume;
+        std::coroutine_handle<> await_suspend(StateHandle) {
+            return self->CommonEmittingAwaitSuspend();
         }
 
         void await_resume() {
+            self->m_is_fsm_active = true;
             *event_return = std::move(self->m_event_for_next_resume);
         }
     };
@@ -743,19 +737,68 @@ public:
     /// @brief Can be awaited from a State coroutine to send an event to this FSM whilst suspending the State until an event is sent to it.
     /// @details If \p event is empty, this FSM will be suspended. 
     /// Else, if (current state, \p event) is in the transition table, it will transition to the target state.
-    /// Else, if no transition was found, an exception will be thrown. If you wish to send events
-    /// to the same current state, use AddTransition to create a circular transition.
+    /// If no transition was found, then the target state will be the current state.
     /// @param event The event to be sent and eventually received. It will be transparently replaced with the received event.
-    /// @exception std::runtime_error Thrown when \p event is not empty but (current state, \p event)
-    /// is not found in the transition table.
-    EmitReceiveAwaitable EmitAndReceive(Event_t& event) {
-        m_event_for_next_resume = std::move(event);
+    [[nodiscard]] EmitReceiveAwaitable EmitAndReceive(Event_t& event) {
+        if (IsResetting() && !event.Empty()) {
+            throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
+        }
+
+        if (!IsResetting()) {
+            m_event_for_next_resume = std::move(event);
+        }
+
         return EmitReceiveAwaitable{this, &event};
     }
 
-    // A simplified form of EmitAndReceive that only waits for an event,
-    // and does not have the emission logic needed for transmission.
-    // Uses an out parameter instead of a return.
+    /// @brief Awaitable type used by @link FSM::EmitAndReceiveResettable @endlink
+    /// @details This type is automatically managed by C++20 Coroutines, and its definition
+    /// is not relevant for end-users of this library.
+    struct EmitReceiveResettableAwaitable {
+        FSM* self{};
+        Event_t* event_return{};
+
+        constexpr bool await_ready() {return false;}
+        std::coroutine_handle<> await_suspend(StateHandle from_state) {
+            self->m_state_to_reset = from_state;
+            return self->CommonEmittingAwaitSuspend();            
+        }
+
+        [[nodiscard]] ResetToken await_resume() {
+            auto reset_token = self->CommonResettableAwaitResume();
+
+            if (reset_token.ShouldReset()) {
+                event_return->Clear();
+            } else {
+                *event_return = std::move(self->m_event_for_next_resume);
+            }
+
+            return reset_token;
+        }
+    };
+
+    friend struct EmitReceiveResettableAwaitable;
+
+    /// @brief Can be awaited from a State coroutine to send an event to this FSM
+    /// whilst suspending the State until an event is sent to it, resetting if a transition occurs instead.
+    /// @details If \p event is empty, this FSM will be suspended. 
+    /// Else, if (current state, \p event) is in the transition table, it will transition to the target state.
+    /// If the target state is a different, non-remote state, then a reset will be triggered. 
+    /// If no transition was found, then the target state will be the current state.\n\n
+    /// Awaiting the result of this function call will return a @ref ResetToken that will indicate whether a reset is happening.
+    /// This can be used to clean up the variables of a @ref State coroutine.
+    /// @param event The event to be sent and eventually received. It will be transparently replaced with the received event.
+    [[nodiscard]] EmitReceiveResettableAwaitable EmitAndReceiveResettable(Event_t& event) {
+        if (IsResetting() && !event.Empty()) {
+            throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
+        }
+
+        if (!IsResetting()) {
+            m_event_for_next_resume = std::move(event);
+        }
+
+        return EmitReceiveResettableAwaitable{this, &event};
+    }
     
 
     /// @brief Awaitable type used by @link FSM::ReceiveEvent @endlink
@@ -766,14 +809,11 @@ public:
         Event_t* event_return;
 
         bool await_ready() {
-            // const Event_t& pending_event = self->m_event_for_next_resume;
-            // return !pending_event.Empty();
             return false;
         }
 
-        void await_suspend(StateHandle) {
-            // If there is no event ready to be read, suspend the entire FSM
-            self->m_is_fsm_active = false;
+        std::coroutine_handle<> await_suspend(StateHandle) {
+            return self->CommonAwaitSuspend();
         }
 
         void await_resume() {
@@ -787,28 +827,72 @@ public:
     /// @brief Can be awaited from a State coroutine to suspend it until an event is sent to it.
     /// @param[out] event_out Where the received Event will be written to
     /// @details The use of an out-parameter here allows for the Event's storage to be reused.
-    ReceiveAwaitable ReceiveEvent(Event_t& event_out) {
-        event_out.Clear(); // Clear the previous event
+    [[nodiscard]] ReceiveAwaitable ReceiveEvent(Event_t& event_out) {
         // Bring the storage for the Event into the FSM so it can be reused by the next
         // call to InsertEvent or EmitAndReceive
-        m_event_for_next_resume = std::move(event_out);
+        if (!IsResetting()) {
+            event_out.Clear(); // Clear the previous event
+            m_event_for_next_resume = std::move(event_out);
+        }
         return ReceiveAwaitable{this, &event_out};
     }
     
+    /// @brief Awaitable type used by @link FSM::ReceiveEventResettable @endlink
+    /// @details This type is automatically managed by C++20 Coroutines, and its definition
+    /// is not relevant for end-users of this library.
+    struct ReceiveResettableAwaitable {
+        FSM* self;
+        Event_t* event_return;
+
+        bool await_ready() {
+            return false;
+        }
+
+        std::coroutine_handle<> await_suspend(StateHandle from_state) {
+            self->m_state_to_reset = from_state;
+            return self->CommonAwaitSuspend();
+        }
+
+        [[nodiscard]] ResetToken await_resume() {
+            auto reset_token = self->CommonResettableAwaitResume();
+
+            if (reset_token.ShouldReset()) {
+                event_return->Clear();
+            } else {
+                *event_return = std::move(self->m_event_for_next_resume);
+            }
+
+            return reset_token;
+        }
+    };
+
+    friend struct ReceiveResettableAwaitable;
+
+    /// @brief Can be awaited from a State coroutine to suspend it until an event is sent to it.
+    /// @param[out] event_out Where the received Event will be written to
+    /// @details The use of an out-parameter here allows for the Event's storage to be reused.
+    [[nodiscard]] ReceiveResettableAwaitable ReceiveEventResettable(Event_t& event_out) {
+        // Bring the storage for the Event into the FSM so it can be reused by the next
+        // call to InsertEvent or EmitAndReceive
+        if (!IsResetting()) {
+            event_out.Clear(); // Clear the previous event
+            m_event_for_next_resume = std::move(event_out);
+        }
+        return ReceiveResettableAwaitable{this, &event_out};
+    }
+
     /// @brief Awaitable type used by @link FSM::ReceiveInitialEvent @endlink
     /// @details This type is automatically managed by C++20 Coroutines, and its definition
     /// is not relevant for end-users of this library.
     struct InitialReceiveAwaitable {
         FSM* self;
 
-        bool await_ready() {
-            const Event_t& pending_event = self->m_event_for_next_resume;
-            return !pending_event.Empty();
+        static constexpr bool await_ready() {
+            return false;
         }
 
-        void await_suspend(StateHandle) {
-            // If there is no event ready to be read, suspend the entire FSM
-            self->m_is_fsm_active = false;
+        std::coroutine_handle<> await_suspend(StateHandle) {
+            return self->CommonAwaitSuspend();
         }
 
         [[nodiscard]] Event_t await_resume() {
@@ -824,24 +908,22 @@ public:
     /// as Event storage cannot be reused when it is returned from the await expression.
     /// Improper usage of this function will cause calls to InsertEvent to unnecessarily allocate memory.
     /// @return When this function call is awaited, it will return the received Event.
-    InitialReceiveAwaitable ReceiveInitialEvent() {
+    [[nodiscard]] InitialReceiveAwaitable ReceiveInitialEvent() {
         return InitialReceiveAwaitable{this};
     }
-    
+
     /// @brief Awaitable type used by @link FSM::IgnoreEvent @endlink
     /// @details This type is automatically managed by C++20 Coroutines, and its definition
     /// is not relevant for end-users of this library.
     struct IgnoreAwaitable {
         FSM* self;
 
-        bool await_ready() {
-            const Event_t& pending_event = self->m_event_for_next_resume;
-            return !pending_event.Empty();
+        static constexpr bool await_ready() {
+            return false;
         }
 
-        void await_suspend(StateHandle) {
-            // If there is no event ready to be read, suspend the entire FSM
-            self->m_is_fsm_active = false;
+        std::coroutine_handle<> await_suspend(StateHandle) {
+            return self->CommonAwaitSuspend();
         }
 
         void await_resume() {
@@ -854,8 +936,37 @@ public:
 
     /// @brief Can be awaited from a State coroutine to ignore the next event sent to this state, suspending
     /// until it is received.
-    IgnoreAwaitable IgnoreEvent() {
+    [[nodiscard]] IgnoreAwaitable IgnoreEvent() {
         return IgnoreAwaitable{this};
+    }
+
+    /// @brief Awaitable type used by @link FSM::IgnoreResettableEvent @endlink
+    /// @details This type is automatically managed by C++20 Coroutines, and its definition
+    /// is not relevant for end-users of this library.
+    struct IgnoreResettableAwaitable {
+        FSM* self;
+
+        static constexpr bool await_ready() {
+            return false;
+        }
+
+        std::coroutine_handle<> await_suspend(StateHandle from_state) {
+            self->m_state_to_reset = from_state;
+            return self->CommonAwaitSuspend();
+        }
+
+        [[nodiscard]] ResetToken await_resume() {
+            self->m_event_for_next_resume.Clear();
+            return self->CommonResettableAwaitResume();
+        }
+    };
+
+    friend struct IgnoreResettableAwaitable;
+
+    /// @brief Can be awaited from a State coroutine to ignore the next event sent to this state, suspending
+    /// until it is received.
+    [[nodiscard]] IgnoreResettableAwaitable IgnoreEventResettable() {
+        return IgnoreResettableAwaitable{this};
     }
 
     // Adds a state to the state machine without associating any events with it.
@@ -881,49 +992,63 @@ public:
 
     std::size_t NumStates() const { return m_states.size(); }
 
-    // Kick off a suspended state machine by sending an event.
-    // If (current state, event id) is in the transition table,
-    // then it is sent to the next_state as defined by the transition.
-    // Else, it is sent to the current_state.
     /// @brief Sends an event to a suspended FSM, potentially triggering a transition.
     /// @details If (cur state, event id) exists in the transition table, then a transition
     /// will be triggered to the target state and the event will be sent to that state and resume.
     /// Otherwise, the event is sent to the current state and it is resumed.\n\n
+    /// \p event_initializer is called with a reference to the stored event object.
+    /// The callable should use Event's member functions to set the id or store data.
+    /// If the event is empty after returning, then the FSM will not be resumed;
+    /// this can be used to reserve space in the stored event without triggering resumption.\n\n
     /// <b>Exception Safety</b>: If an exception escapes any of the states eventually resumed
     /// by this function call, that State will be marked "abominable", then the exception will
     /// be rethrown from that call. The abominable state should be removed and readded before
     /// it is resumed, otherwise it results in undefined behavior.
-    /// @exception std::runtime_error Thrown if this function is called while the FSM is active.
-    /// @todo Detect no current state and abominable states in resumption
-    FSM& InsertEvent(Event_t&& e) {
-        // Store the event in the FSM, which will get moved by the next Awaitable resumed
-        m_event_for_next_resume = std::move(e);
+    /// @todo Detect no current state, empty event, and abominable states in resumption
+    template<std::invocable<Event_t&> F>
+    FSM& InsertEvent(F&& event_initializer) {
+        std::forward<F>(event_initializer)(m_event_for_next_resume);
 
         // Treat this event as one that could change the state
-        std::optional<TransitionResult> potential_transition = PerformTransition();
-
-        // // potential_transition has_value() means that a transition was found and
-        // // potential_transition is the coroutine to be resumed.
-        // // Else, no transition occured, send the event to the current state.
-        std::coroutine_handle<> state_to_resume = potential_transition.has_value() ?
-            potential_transition->state_to_resume :
-            _state;
-
+        const Transitioner& potential_transition = GetTransitioner(m_event_for_next_resume);
+        std::coroutine_handle<> state_to_resume = potential_transition.Perform(*this);
+    
         // If an exception is thrown while the state is running, catch it to 
         // always cleanup
         try {
             state_to_resume.resume();
         } catch (...) {
-            if (potential_transition.has_value() && potential_transition->IsRemote()) {
-                potential_transition->remote_done_reporter->ReportDone(true);
-            } else {
-                m_is_fsm_active = false;
-                _state = nullptr;
-            }
+            potential_transition.ReportDone(*this, true);
             throw;
         }
 
         return *this;
+    }
+
+    /// \brief Shortcut for the function overload of InsertEvent which sets the Id of
+    /// the event without storing associated data.
+    FSM& InsertEvent(EventId id)  {
+        return InsertEvent([&id](Event_t& ev) {
+            ev.Store(std::move(id));
+        });
+    }
+
+    /// \brief Shortcut for the function overload of InsertEvent which sets the Id of
+    /// the event and stores associated data
+    template<typename T>
+    FSM& InsertEvent(EventId id, T&& obj) {
+        return InsertEvent([&id, &obj](Event_t& ev) {
+            ev.Store(std::move(id), std::forward<T>(obj));
+        });
+    }
+
+    /// \brief Shortcut for the function overload of InsertEvent which sets the Id of
+    /// the event and constructs the associated data in-place
+    template<typename T, typename... Args>
+    FSM& EmplaceEvent(EventId id, Args&&... args) {
+        return InsertEvent([&id, &args...](Event_t& ev) {
+            ev.template Emplace<T>(std::move(id), std::forward<Args>(args)...);
+        });
     }
 
     bool HasState(StateId id) const {
@@ -942,6 +1067,35 @@ public:
         std::erase_if(m_states, [](const State_t& s) {
             return s.IsAbominable();
         });
+    }
+
+    /// @brief Moves out the stored Event object within the FSM
+    /// @details In most cases, this will be an empty event object with
+    /// a non-zero capacity. However, this event may be non-empty if 
+    /// a State never received the event due to an uncaught exception
+    /// during an reset.
+    Event_t ExtractStoredEvent() {
+        m_transition_after_reset = nullptr;
+        return std::move(m_event_for_next_resume);
+    }
+
+    /// @brief Resends a stored Event, useful for recovering from an 
+    /// exception during a reset
+    /// @details Has no effect if there is no stored event.
+    /// @returns True if an event was resent.
+    /// @exception User-defined Has the same exception rules as @ref InsertEvent
+    bool ResendStoredEvent() {
+        if (m_event_for_next_resume.Empty() || m_transition_after_reset == nullptr)
+            return false;
+
+        try {
+            m_transition_after_reset->Perform(*this).resume();
+        } catch (...) {
+            m_transition_after_reset->ReportDone(*this, true);
+            throw;
+        }
+
+        return true;
     }
 
     /// @brief Returns true if any State coroutine is currently running.
@@ -974,14 +1128,6 @@ private:
         return it != m_states.end() ? &*it : nullptr;
     }
 
-    void TrySetActive() {
-        if (m_is_fsm_active) {
-            throw std::runtime_error(std::format("Attempt to insert event into FSM '{}' while it is running", Name()));
-        }
-
-        m_is_fsm_active = true;
-    }
-
     struct LocalTransitionTarget {
         StateHandle state{};
     };
@@ -989,45 +1135,54 @@ private:
     struct RemoteTransitionTargetBase {
         virtual ~RemoteTransitionTargetBase() = default;
 
-        virtual std::coroutine_handle<> TryTransitionOnRemote(FSM& originating_fsm) const = 0;
-        virtual const detail::DoneReporterBase& GetTargetDoneReporter() const = 0;
+        virtual std::coroutine_handle<> TransitionOnRemote(FSM& originating_fsm) const = 0;
+        virtual void ReportDone(bool nullify_current_state) const = 0;
     };
 
     // D... = Destination
     template<typename DStateId, typename DEventId>
-    struct RemoteTransitionTarget final : RemoteTransitionTargetBase, detail::DoneReporterBase {
+    struct RemoteTransitionTarget final : RemoteTransitionTargetBase {
         using DFSM_t = FSM<DStateId, DEventId>;
 
         DFSM_t* target_fsm{};
-        typename DFSM_t::StateHandle target_state_handle{};
+        typename DFSM_t::Transitioner local_transitioner{};
+        typename DFSM_t::StateHandle target_state{};
         DEventId translated_event_id;
 
-        std::coroutine_handle<> TryTransitionOnRemote(FSM& originating_fsm) const override {
-            target_fsm->TrySetActive();
-            
+        RemoteTransitionTarget(DFSM_t& target_fsm, typename DFSM_t::StateHandle target_state, DEventId translated_id)
+            : target_fsm(&target_fsm),
+              local_transitioner(typename DFSM_t::LocalTransition{target_state}),
+              target_state(target_state),
+              translated_event_id(translated_id)
+        { }
+
+        std::coroutine_handle<> TransitionOnRemote(FSM& originating_fsm) const override {
             // Translate the event to the EventId type of the target FSM,
             // then store it into the target FSM
             auto& originating_event = originating_fsm.m_event_for_next_resume;
             auto& target_event = target_fsm->m_event_for_next_resume;
 
-            target_event = originating_event.template TransferToIdType(DEventId(translated_event_id));
+            target_event = originating_event.TransferToIdType(DEventId(translated_event_id));
 
-            target_fsm->_state = target_state_handle;
+            const bool different_states = target_fsm->_state != target_state;
 
-            originating_fsm.m_is_fsm_active = false;
-            return target_state_handle;
+            if (!target_fsm->IsResetting() && target_fsm->ShouldSendResetOnTransition() && different_states) {
+                target_fsm->m_transition_after_reset = &local_transitioner;
+
+                target_fsm->_state = target_fsm->m_state_to_reset;
+                return target_fsm->m_state_to_reset;
+            } else {
+                return local_transitioner.Perform(*target_fsm);
+            }
         }
-
-        const detail::DoneReporterBase& GetTargetDoneReporter() const override {
-            return *this;
-        };
         
         void ReportDone(bool nullify_current_state) const override {
-            target_fsm->m_is_fsm_active = false;
-
             if (nullify_current_state) {
                 target_fsm->_state = nullptr;
             }
+
+            target_fsm->m_state_to_reset = nullptr;
+            target_fsm->m_is_fsm_active = false;
         }
     };
 
@@ -1035,45 +1190,86 @@ private:
     friend struct RemoteTransitionTarget;
 
     using RemoteTransitionTargetPtr = std::unique_ptr<RemoteTransitionTargetBase>;
-    using TransitionTarget = std::variant<LocalTransitionTarget, RemoteTransitionTargetPtr>;
 
-    struct TransitionResult {
+    struct LocalTransition {
         std::coroutine_handle<> state_to_resume{};
-        const detail::DoneReporterBase* remote_done_reporter{};
+    };
+
+    struct RemoteTransition {
+        RemoteTransitionTargetPtr remote_target{};
+    };
+
+    struct NullTransition { };
+
+    class Transitioner {
+        std::variant<LocalTransition, RemoteTransition, NullTransition> m_data{};
+
+    public:
+        Transitioner(NullTransition) : m_data(std::in_place_type<NullTransition>) { }
+        Transitioner(LocalTransition local) : m_data(local) { }
+        Transitioner(RemoteTransition&& remote) : m_data(std::move(remote)) { }
+
+        std::coroutine_handle<> Perform(FSM& originating) const {
+            return std::visit([&originating, this]<typename T>(const T& o) -> std::coroutine_handle<> {
+                if constexpr (std::is_same_v<T, LocalTransition>) {
+                    const LocalTransition& local = o;
+                    const bool different_states = originating._state != local.state_to_resume;
+
+                    // Trigger a reset if needed
+                    if (!originating.IsResetting() && originating.ShouldSendResetOnTransition() && different_states) {
+                        originating.m_transition_after_reset = this;
+                        originating._state = originating.m_state_to_reset;
+                        return originating.m_state_to_reset;
+                    } else {
+                        // If we get here while resetting, that means the reset is done and can be cleared
+                        if (originating.IsResetting()) {
+                            originating.m_transition_after_reset = nullptr;
+                            originating.m_state_to_reset = nullptr;
+                        }
+
+                        originating._state = StateHandle::from_address(local.state_to_resume.address());
+                        return local.state_to_resume;
+                    }
+                } else if constexpr (std::is_same_v<T, RemoteTransition>) {
+                    const RemoteTransitionTargetBase& remote = *o.remote_target;
+                    return remote.TransitionOnRemote(originating);
+                } else if constexpr(std::is_same_v<T, NullTransition>) {
+                    return originating._state;
+                }
+            }, m_data);
+        }
+
+        void ReportDone(FSM& originating, bool nullify_current_state) const {
+            return std::visit([&originating, nullify_current_state]<typename T>(const T& o) {
+                if constexpr (std::is_same_v<T, LocalTransition> || std::is_same_v<T, NullTransition>) {
+                    if (nullify_current_state) {
+                        originating._state = nullptr;
+                    }
+
+                    originating.m_state_to_reset = nullptr;
+                    originating.m_is_fsm_active = false;
+                } else if constexpr(std::is_same_v<T, RemoteTransition>) {
+                    const RemoteTransitionTargetBase& remote = *o.remote_target;
+                    remote.ReportDone(nullify_current_state);
+                }
+            }, m_data);
+
+        }
 
         bool IsRemote() const {
-            return remote_done_reporter != nullptr;
+            return std::holds_alternative<RemoteTransition>(m_data);
+        }
+
+        bool IsNull() const {
+            return std::holds_alternative<NullTransition>(m_data);
         }
     };
 
-    std::optional<TransitionResult> PerformTransition() noexcept {
-        const Event_t& pending_event = m_event_for_next_resume;
-        const TransitionTarget* transition;
-
-        if (auto it = m_transition_table.find({_state, pending_event.GetId()}); it != m_transition_table.end())
-            transition = &it->second;
+    const Transitioner& GetTransitioner(const Event_t& event) const noexcept {
+        if (auto it = m_transition_table.find({_state, event.GetId()}); it != m_transition_table.end())
+            return it->second;
         else
-            return std::nullopt; // No coded state transition, return empty handle to signify this
-
-        return std::visit([this]<typename T>(const T& o) -> TransitionResult {
-            if constexpr (std::is_same_v<T, LocalTransitionTarget>) {
-                const LocalTransitionTarget& local = o;
-                this->_state = local.state;
-
-                return {
-                    .state_to_resume = this->_state,
-                    .remote_done_reporter = nullptr
-                };
-            } else if constexpr(std::is_same_v<T, RemoteTransitionTargetPtr>) {
-                const RemoteTransitionTargetBase& remote = *o;
-                auto remote_handle = remote.TryTransitionOnRemote(*this);
-
-                return {
-                    .state_to_resume = remote_handle,
-                    .remote_done_reporter = &remote.GetTargetDoneReporter()
-                };
-            }
-        }, *transition);
+            return null_transition; // No coded state transition, return null transition
     }
 
     // The 'from' and 'event' of a transition
@@ -1098,15 +1294,79 @@ private:
         }
     };
 
+    bool IsResetting() const {
+        return m_transition_after_reset != nullptr;
+    }
+
+    bool ShouldResumeRespondWithReset() const {
+        return m_state_to_reset != nullptr && m_transition_after_reset != nullptr;
+    }
+
+    bool ShouldSendResetOnTransition() const {
+        return m_state_to_reset != nullptr;
+    }
+
+    // If currently resetting, this will return the stored post-reset transition.
+    // Else, it will suspend entirely.
+    std::coroutine_handle<> CommonAwaitSuspend() {
+        m_is_fsm_active = false;
+
+        if (!IsResetting()) {
+            return std::noop_coroutine();
+        }
+
+        // If we get here while resetting, the reset is complete and the state
+        // has suspended. Clear the reset info.
+        const Transitioner* transitioner = std::exchange(m_transition_after_reset, nullptr);
+        m_state_to_reset = nullptr;
+
+        return transitioner->Perform(*this);
+    }
+
+    // If currently resetting, this will resume the stored post-reset transition.
+    // Else, it will check the pending event and perform its transitioner
+    std::coroutine_handle<> CommonEmittingAwaitSuspend() {
+        m_is_fsm_active = false;
+
+        const Event_t& pending_event = m_event_for_next_resume;
+        
+        // If this state sends an empty event and we're not resetting,
+        // then suspend the FSM
+        if (pending_event.Empty() && !IsResetting()) {
+            return std::noop_coroutine();
+        }
+
+        const Transitioner& transitioner = IsResetting()
+            ? *m_transition_after_reset
+            : GetTransitioner(pending_event);
+
+        return transitioner.Perform(*this);
+    }
+
+    ResetToken CommonResettableAwaitResume() {
+        m_is_fsm_active = true;
+
+        if (ShouldResumeRespondWithReset()) {
+            return true;
+        } else {
+            m_state_to_reset = nullptr;
+            return false;
+        }
+    }
 
     // Transition table in format {from-state, event} -> to-state
     // That is, an event sent from from-state will be routed to to-state.
-    std::unordered_map<PartialTransition, TransitionTarget, PartialTransitionHash> m_transition_table;
+    std::unordered_map<PartialTransition, Transitioner, PartialTransitionHash> m_transition_table{};
 
     std::vector<State_t> m_states;
+    StateHandle m_state_to_reset{};
+    const Transitioner* m_transition_after_reset{};
+
+    // Shared null_transition instance
+    inline static const Transitioner null_transition{NullTransition{}};
 
     // True if the FSM is running, false if suspended.
-    bool m_is_fsm_active = false;
+    bool m_is_fsm_active{};
 
     // Temporary event storage to be captured by Awaitable on resume
     Event_t m_event_for_next_resume{};
