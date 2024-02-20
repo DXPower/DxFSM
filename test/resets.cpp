@@ -324,6 +324,91 @@ TEST_CASE("Resettable States Remote Transitions Do Not Reset Local", "[advanced]
     }
 }
 
-// TEST_CASE("Resettable States with Remote Transitions", "[advanced][resets][remote][exceptions]") {
+namespace {
+    enum class ActionType {
+        Received,
+        ReceivedReset,
+        Ignored,
+        IgnoredReset,
+    };
 
-// }
+    struct Action {
+        StateId state{};
+        ActionType action{};
+        int event_data{};
+
+        friend std::ostream& operator<<(std::ostream& out, const Action& a) {
+            auto action_str = [=] {
+                switch (a.action) {
+                case ActionType::Received: return "Received";
+                case ActionType::ReceivedReset: return "ReceivedReset";
+                case ActionType::Ignored: return "Ignored";
+                case ActionType::IgnoredReset: return "IgnoredReset";
+                }
+            }();
+
+            out << std::format("{{S: {}; A: {}; E: {}}}", a.state, action_str, a.event_data);
+            return out;
+        }
+
+        bool operator==(const Action& rhs) const = default;
+    };
+
+    struct OtherResets {
+        FSM_t fsm{};
+        std::vector<Action> actions{};
+
+        OtherResets() {
+            fsm
+                .AddState(StateFunc(fsm, "One"))
+                .AddState(StateFunc(fsm, "Two"))
+                .AddTransition("One", EventId::InnerStep, "One")
+                .AddTransition("Two", EventId::InnerStep, "Two")
+                .AddTransition("One", EventId::Jump, "Two")
+                .AddTransition("Two", EventId::Jump, "One");
+
+            fsm.SetCurrentState("One");
+        }
+
+        State_t StateFunc(FSM_t& fsm, StateId id) {
+            Event_t event{};
+
+            while (true) {
+                auto should_reset = co_await fsm.ReceiveEventResettable(event);
+
+                if (!should_reset) {
+                    actions.push_back({id, ActionType::Received, event.Get<int>()});
+                } else {
+                    actions.push_back({id, ActionType::ReceivedReset, -1});
+                }
+
+                should_reset = co_await fsm.IgnoreEventResettable();
+
+                if (!should_reset) {
+                    actions.push_back({id, ActionType::Ignored, -1});
+                } else {
+                    actions.push_back({id, ActionType::IgnoredReset, -1});
+                }
+            }
+        }
+    };
+}
+
+TEST_CASE("Other Resettable Awaitables", "[advanced][resets]") {
+    OtherResets resets{};
+
+    int counter = 1;
+    resets.fsm.InsertEvent(EventId::InnerStep, counter++);
+    resets.fsm.InsertEvent(EventId::InnerStep, counter++);
+    resets.fsm.InsertEvent(EventId::Jump, counter++);
+    resets.fsm.InsertEvent(EventId::Jump, counter++);
+
+    CHECK_THAT(resets.actions, Catch::Matchers::Equals(std::vector{
+        Action{"One", ActionType::Received, 1},
+        Action{"One", ActionType::Ignored, -1},
+        Action{"One", ActionType::ReceivedReset, -1},
+        Action{"Two", ActionType::Received, 3},
+        Action{"Two", ActionType::IgnoredReset, -1},
+        Action{"One", ActionType::Ignored, -1},
+    }));
+}

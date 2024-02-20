@@ -737,12 +737,9 @@ public:
     /// @brief Can be awaited from a State coroutine to send an event to this FSM whilst suspending the State until an event is sent to it.
     /// @details If \p event is empty, this FSM will be suspended. 
     /// Else, if (current state, \p event) is in the transition table, it will transition to the target state.
-    /// Else, if no transition was found, an exception will be thrown. If you wish to send events
-    /// to the same current state, use AddTransition to create a circular transition.
+    /// If no transition was found, then the target state will be the current state.
     /// @param event The event to be sent and eventually received. It will be transparently replaced with the received event.
-    /// @exception std::runtime_error Thrown when \p event is not empty but (current state, \p event)
-    /// is not found in the transition table.
-    EmitReceiveAwaitable EmitAndReceive(Event_t& event) {
+    [[nodiscard]] EmitReceiveAwaitable EmitAndReceive(Event_t& event) {
         if (IsResetting() && !event.Empty()) {
             throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
         }
@@ -782,7 +779,16 @@ public:
 
     friend struct EmitReceiveResettableAwaitable;
 
-    EmitReceiveResettableAwaitable EmitAndReceiveResettable(Event_t& event) {
+    /// @brief Can be awaited from a State coroutine to send an event to this FSM
+    /// whilst suspending the State until an event is sent to it, resetting if a transition occurs instead.
+    /// @details If \p event is empty, this FSM will be suspended. 
+    /// Else, if (current state, \p event) is in the transition table, it will transition to the target state.
+    /// If the target state is a different, non-remote state, then a reset will be triggered. 
+    /// If no transition was found, then the target state will be the current state.\n\n
+    /// Awaiting the result of this function call will return a @ref ResetToken that will indicate whether a reset is happening.
+    /// This can be used to clean up the variables of a @ref State coroutine.
+    /// @param event The event to be sent and eventually received. It will be transparently replaced with the received event.
+    [[nodiscard]] EmitReceiveResettableAwaitable EmitAndReceiveResettable(Event_t& event) {
         if (IsResetting() && !event.Empty()) {
             throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
         }
@@ -821,7 +827,7 @@ public:
     /// @brief Can be awaited from a State coroutine to suspend it until an event is sent to it.
     /// @param[out] event_out Where the received Event will be written to
     /// @details The use of an out-parameter here allows for the Event's storage to be reused.
-    ReceiveAwaitable ReceiveEvent(Event_t& event_out) {
+    [[nodiscard]] ReceiveAwaitable ReceiveEvent(Event_t& event_out) {
         // Bring the storage for the Event into the FSM so it can be reused by the next
         // call to InsertEvent or EmitAndReceive
         if (!IsResetting()) {
@@ -831,15 +837,58 @@ public:
         return ReceiveAwaitable{this, &event_out};
     }
     
+    /// @brief Awaitable type used by @link FSM::ReceiveEventResettable @endlink
+    /// @details This type is automatically managed by C++20 Coroutines, and its definition
+    /// is not relevant for end-users of this library.
+    struct ReceiveResettableAwaitable {
+        FSM* self;
+        Event_t* event_return;
+
+        bool await_ready() {
+            return false;
+        }
+
+        std::coroutine_handle<> await_suspend(StateHandle from_state) {
+            self->m_state_to_reset = from_state;
+            return self->CommonAwaitSuspend();
+        }
+
+        [[nodiscard]] ResetToken await_resume() {
+            auto reset_token = self->CommonResettableAwaitResume();
+
+            if (reset_token.ShouldReset()) {
+                event_return->Clear();
+            } else {
+                *event_return = std::move(self->m_event_for_next_resume);
+            }
+
+            return reset_token;
+        }
+    };
+
+    friend struct ReceiveResettableAwaitable;
+
+    /// @brief Can be awaited from a State coroutine to suspend it until an event is sent to it.
+    /// @param[out] event_out Where the received Event will be written to
+    /// @details The use of an out-parameter here allows for the Event's storage to be reused.
+    [[nodiscard]] ReceiveResettableAwaitable ReceiveEventResettable(Event_t& event_out) {
+        // Bring the storage for the Event into the FSM so it can be reused by the next
+        // call to InsertEvent or EmitAndReceive
+        if (!IsResetting()) {
+            event_out.Clear(); // Clear the previous event
+            m_event_for_next_resume = std::move(event_out);
+        }
+        return ReceiveResettableAwaitable{this, &event_out};
+    }
+
     /// @brief Awaitable type used by @link FSM::ReceiveInitialEvent @endlink
     /// @details This type is automatically managed by C++20 Coroutines, and its definition
     /// is not relevant for end-users of this library.
     struct InitialReceiveAwaitable {
         FSM* self;
 
-        bool await_ready() {
-            const Event_t& pending_event = self->m_event_for_next_resume;
-            return !pending_event.Empty();
+        static constexpr bool await_ready() {
+            return false;
         }
 
         std::coroutine_handle<> await_suspend(StateHandle) {
@@ -859,19 +908,18 @@ public:
     /// as Event storage cannot be reused when it is returned from the await expression.
     /// Improper usage of this function will cause calls to InsertEvent to unnecessarily allocate memory.
     /// @return When this function call is awaited, it will return the received Event.
-    InitialReceiveAwaitable ReceiveInitialEvent() {
+    [[nodiscard]] InitialReceiveAwaitable ReceiveInitialEvent() {
         return InitialReceiveAwaitable{this};
     }
-    
+
     /// @brief Awaitable type used by @link FSM::IgnoreEvent @endlink
     /// @details This type is automatically managed by C++20 Coroutines, and its definition
     /// is not relevant for end-users of this library.
     struct IgnoreAwaitable {
         FSM* self;
 
-        bool await_ready() {
-            const Event_t& pending_event = self->m_event_for_next_resume;
-            return !pending_event.Empty();
+        static constexpr bool await_ready() {
+            return false;
         }
 
         std::coroutine_handle<> await_suspend(StateHandle) {
@@ -888,8 +936,37 @@ public:
 
     /// @brief Can be awaited from a State coroutine to ignore the next event sent to this state, suspending
     /// until it is received.
-    IgnoreAwaitable IgnoreEvent() {
+    [[nodiscard]] IgnoreAwaitable IgnoreEvent() {
         return IgnoreAwaitable{this};
+    }
+
+    /// @brief Awaitable type used by @link FSM::IgnoreResettableEvent @endlink
+    /// @details This type is automatically managed by C++20 Coroutines, and its definition
+    /// is not relevant for end-users of this library.
+    struct IgnoreResettableAwaitable {
+        FSM* self;
+
+        static constexpr bool await_ready() {
+            return false;
+        }
+
+        std::coroutine_handle<> await_suspend(StateHandle from_state) {
+            self->m_state_to_reset = from_state;
+            return self->CommonAwaitSuspend();
+        }
+
+        [[nodiscard]] ResetToken await_resume() {
+            self->m_event_for_next_resume.Clear();
+            return self->CommonResettableAwaitResume();
+        }
+    };
+
+    friend struct IgnoreResettableAwaitable;
+
+    /// @brief Can be awaited from a State coroutine to ignore the next event sent to this state, suspending
+    /// until it is received.
+    [[nodiscard]] IgnoreResettableAwaitable IgnoreEventResettable() {
+        return IgnoreResettableAwaitable{this};
     }
 
     // Adds a state to the state machine without associating any events with it.
@@ -1005,6 +1082,7 @@ public:
     /// @brief Resends a stored Event, useful for recovering from an 
     /// exception during a reset
     /// @details Has no effect if there is no stored event.
+    /// @returns True if an event was resent.
     /// @exception User-defined Has the same exception rules as @ref InsertEvent
     bool ResendStoredEvent() {
         if (m_event_for_next_resume.Empty() || m_transition_after_reset == nullptr)
