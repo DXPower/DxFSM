@@ -101,9 +101,9 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
 
     using EventId = ExternalEventId_e;
 
-    red.fsm.AddRemoteTransition("RedOn", EventId::CycleOut, green.fsm, "GreenOn"sv);
-    green.fsm.AddRemoteTransition("GreenOn", EventId::CycleOut, blue.fsm, "BlueOn"sv);
-    blue.fsm.AddRemoteTransition("BlueOn", EventId::CycleOut, red.fsm, "RedOn"sv);
+    red.fsm.AddRemoteTransition("RedOn"sv, EventId::CycleOut, green.fsm, "GreenOn"sv);
+    green.fsm.AddRemoteTransition("GreenOn"sv, EventId::CycleOut, blue.fsm, "BlueOn"sv);
+    blue.fsm.AddRemoteTransition("BlueOn"sv, EventId::CycleOut, red.fsm, "RedOn"sv);
 
     SECTION("Normal Operation") {
         CHECK(red.fsm.GetCurrentState()->Name() == "RedOff");
