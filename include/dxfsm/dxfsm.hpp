@@ -378,7 +378,28 @@ void swap(Event<Id>& lhs, Event<Id>& rhs) {
 template<typename StateId, typename EventId>
 class FSM;
 
+namespace detail {
+    struct DoneReporterBase {
+        virtual ~DoneReporterBase() = default;
 
+        virtual void ReportDone(bool nullify_current_state) const = 0;
+    };
+
+    class RemoteTransitionTargetBase {
+    public:
+        virtual ~RemoteTransitionTargetBase() = default;
+
+        virtual std::coroutine_handle<> TransitionOnRemote(void* originating_fsm_ptr) const = 0;
+        virtual void ReportDone(bool nullify_current_state) const = 0;
+        virtual bool RebindTransition() = 0;
+        virtual bool IsTransitionDangling() const = 0;
+    };
+
+    template<typename, typename, typename, typename>
+    class RemoteTransitionTarget;
+
+    using RemoteTransitionTargetPtr = std::unique_ptr<RemoteTransitionTargetBase>;
+}
 
 // Return type of coroutines which represent states.
 /// @brief The coroutine handle type that represents discrete states in the FSM
@@ -515,15 +536,11 @@ private:
 
     template<typename S>
     friend class HandleOrId;
+
+    template<typename, typename, typename, typename>
+    friend class detail::RemoteTransitionTarget;
 }; // State
 
-namespace detail {
-    struct DoneReporterBase {
-        virtual ~DoneReporterBase() = default;
-
-        virtual void ReportDone(bool nullify_current_state) const = 0;
-    };
-}
 
 class ResetToken {
     bool m_should_reset{};
@@ -541,51 +558,61 @@ public:
     }
 };
 
-template<typename StateId>
-class HandleOrId {
-public:
-    using StateHandle = typename State<StateId>::handle_type;
+// namespace detail {
+// template<typename T>
+// concept IsHandle = 
+// }
 
-private:
-    std::variant<StateHandle, StateId> m_data{};
+// template<typename StateId>
+// class HandleOrId {
+// public:
+//     using StateHandle = typename State<StateId>::handle_type;
 
-public:
-    // HandleOrId(StateHandle handle) : m_data(handle) { }
-    // HandleOrId(StateId id) : m_data(std::move(id)) { }
-    template<typename T>
-    HandleOrId(T&& o) {
-        constexpr bool is_handle = std::is_constructible_v<StateHandle, T>;
-        constexpr bool is_id = std::is_constructible_v<StateId, T>;
+// private:
+//     std::variant<StateHandle, StateId> m_data{};
 
-        static_assert(is_handle || is_id);
+// public:
+//     // HandleOrId(StateHandle handle) : m_data(handle) { }
+//     // HandleOrId(StateId id) : m_data(std::move(id)) { }
+//     template<typename T>
+//     requires (not std::is_same_v<std::remove_cvref_t<T>, HandleOrId>)
+//     HandleOrId(T&& o) {
+//         constexpr bool is_handle = std::is_constructible_v<StateHandle, T>;
+//         constexpr bool is_id = std::is_constructible_v<StateId, T>;
 
-        if constexpr (is_handle) {
-            m_data.template emplace<StateHandle>(std::forward<T>(o));
-        } else if constexpr (is_id) {
-            m_data.template emplace<StateId>(std::forward<T>(o));
-        }
-    }
-    template<typename EventId>
-    StateHandle GetHandle(const FSM<StateId, EventId>& fsm) const {
-        if (std::holds_alternative<StateHandle>(m_data)) {
-            return std::get<StateHandle>(m_data);
-        }
+//         static_assert(is_handle || is_id);
 
-        if (const auto* state = fsm.FindState(std::get<StateId>(m_data))) {
-            return state->Handle();
-        }
+//         if constexpr (is_handle) {
+//             m_data.template emplace<StateHandle>(std::forward<T>(o));
+//         } else if constexpr (is_id) {
+//             m_data.template emplace<StateId>(std::forward<T>(o));
+//         }
+//     }
 
-        return nullptr;
-    }
+//     HandleOrId(const HandleOrId& copy) = default;
+//     HandleOrId(HandleOrId&& move) = default;
+
+//     template<typename EventId>
+//     StateHandle GetHandle(const FSM<StateId, EventId>& fsm) const {
+//         if (std::holds_alternative<StateHandle>(m_data)) {
+//             return std::get<StateHandle>(m_data);
+//         }
+
+//         if (const auto* state = fsm.FindState(std::get<StateId>(m_data))) {
+//             return state->Handle();
+//         }
+
+//         return nullptr;
+//     }
     
-    const StateId& GetId() const {
-        if (std::holds_alternative<StateId>(m_data)) {
-            return std::get<StateId>(m_data);
-        } else {
-            return std::get<StateHandle>(m_data).promise().id;
-        }
-    }
-};
+//     const StateId& GetId() const {
+//         if (std::holds_alternative<StateId>(m_data)) {
+//             return std::get<StateId>(m_data);
+//         } else {
+//             return std::get<StateHandle>(m_data).promise().id;
+//         }
+//     }
+// };
 
 /// @brief The core class for representing a Finite State Machine
 /// @details This class needs to be created first so it can be passed
@@ -653,16 +680,18 @@ public:
     /// will trigger this transition.\n
     /// The combination of (from, event) forms a unique transition. If such a transition already exists,
     /// then its target \p to will be replaced.
-    FSM& AddTransition(HandleOrId<StateId> from, EventId event, HandleOrId<StateId> to) {
-        auto from_handle = from.GetHandle(*this);
-        auto to_handle = to.GetHandle(*this);
+    FSM& AddTransition(StateId from, EventId event, StateId to) {
+        // auto from_handle = from.GetHandle(*this);
+        // TODO: add check
+        auto from_handle = FindState(from)->Handle();
+        auto to_handle = FindState(to)->Handle();
 
         m_transition_table.emplace(
             PartialTransition{
                 .from = from_handle,
                 .event = std::move(event)
             },
-            LocalTransition{to_handle, to.GetId()}
+            LocalTransition{to_handle, to}
         );
 
         return *this;
@@ -680,26 +709,38 @@ public:
     /// may become dangling if \p remote_fsm is moved or destroyed.
     template<typename DStateId, typename DEventId>
     FSM& AddRemoteTransition(
-        HandleOrId<StateId> from,
+        StateId from,
         EventId event,
         FSM<DStateId, DEventId>& remote_fsm,
         DStateId to) {
         static_assert(std::is_same_v<EventId, DEventId>, "Remote transition must provide EventId translation if the types do not match.");
 
-        auto from_handle = from.GetHandle(*this);
-        auto to_handle = remote_fsm.FindState(to)->Handle();
+        return AddRemoteTransition(from, event, remote_fsm, to, event);
+    }
 
-        auto target = std::make_unique<RemoteTransitionTarget<StateId, EventId, DStateId, DEventId>>(
+    template<typename DStateId, typename DEventId>
+    FSM& AddRemoteTransition(
+        StateId from_state,
+        EventId from_event,
+        FSM<DStateId, DEventId>& remote_fsm,
+        DStateId to_state,
+        DEventId translated_event) {
+
+        // TODO: add checks
+        auto from_handle = FindState(from_state)->Handle();
+        auto to_handle = remote_fsm.FindState(to_state)->Handle();
+
+        auto target = std::make_unique<detail::RemoteTransitionTarget<StateId, EventId, DStateId, DEventId>>(
             remote_fsm,
             to_handle,
-            to,
-            event
+            to_state,
+            translated_event
         );
 
         m_transition_table.emplace(
             PartialTransition{
                 .from = from_handle,
-                .event = std::move(event)
+                .event = std::move(from_event)
             },
             RemoteTransition{std::move(target)}
         );
@@ -1019,10 +1060,12 @@ public:
         //         _name
         //     ));
 
-        if (state.Handle())
+        if (state.Handle()) {
             m_states.push_back(std::move(state));
-        else
+            RebindTransitions();
+        } else {
             throw std::runtime_error(std::format("Attempt to add an empty state to FSM '{}'", Name()));
+        }
         
         return *this;
     }
@@ -1118,19 +1161,19 @@ public:
         });
     }
 
-    /// @brief Rebinds dangling transitions, only if the target state id has been readded after
-    /// throwing an exception
-    void RebindAbominableTransitions() {
+    /// @brief Rebinds the latest state handles of the target IDs of remote transitions
+    void RebindRemoteTransitions() {
         for (auto& [from, transitioner] : m_transition_table) {
-            transitioner.Rebind();
+            if (transitioner.IsRemote())
+                transitioner.Rebind(*this);
         }
     }
 
-    /// @brief Removes dangling transitions left after a one or more states became abominable
-    /// due to an uncaught exception.
-    std::size_t RemoveAbominableTransitions() {
-        return std::erase_if(m_transition_table, [](const auto& p) {
-            return p.second.IsDangling();
+    /// @brief Removes dangling transitions left after a target state was removed
+    /// or was made abominable via an uncaught exception
+    std::size_t RemoveDanglingTransitions() {
+        return std::erase_if(m_transition_table, [this](const auto& p) {
+            return p.second.IsDangling(*this);
         });
     }
 
@@ -1180,92 +1223,12 @@ public:
     > logger;
 
 private:
-    std::string _name;       // Name of the FSM (for information only)
-    StateHandle _state = nullptr; // Current state (for information only)
-
     struct LocalTransitionTarget {
         StateHandle state{};
     };
 
-    struct RemoteTransitionTargetBase {
-        virtual ~RemoteTransitionTargetBase() = default;
-
-        virtual std::coroutine_handle<> TransitionOnRemote(void* originating_fsm_ptr) const = 0;
-        virtual void ReportDone(bool nullify_current_state) const = 0;
-        virtual void RebindTransition() = 0;
-        virtual bool IsTransitionDangling() const = 0;
-    };
-
-
-    // O... = Origin, D... = Destination
-    template<typename OStateId, typename OEventId, typename DStateId, typename DEventId>
-    struct RemoteTransitionTarget final : RemoteTransitionTargetBase {
-        using DFSM_t = FSM<DStateId, DEventId>;
-
-        DFSM_t* target_fsm{};
-        typename DFSM_t::Transitioner local_transitioner{};
-        typename DFSM_t::StateHandle target_state{};
-        DStateId id_to_resume{};
-        DEventId translated_event_id;
-
-        RemoteTransitionTarget(
-            DFSM_t& target_fsm,
-            typename DFSM_t::StateHandle target_state,
-            DStateId id_to_resume,
-            DEventId translated_id)
-            : target_fsm(&target_fsm),
-              local_transitioner(typename DFSM_t::LocalTransition{target_state}),
-              target_state(target_state),
-              id_to_resume(std::move(id_to_resume)),
-              translated_event_id(std::move(translated_id))
-        { }
-
-        std::coroutine_handle<> TransitionOnRemote(void* originating_fsm_ptr) const override {
-            auto& originating_fsm = *static_cast<FSM<OStateId, OEventId>*>(originating_fsm_ptr);
-            // Translate the event to the EventId type of the target FSM,
-            // then store it into the target FSM
-            auto& originating_event = originating_fsm.m_event_for_next_resume;
-            auto& target_event = target_fsm->m_event_for_next_resume;
-
-            target_event = originating_event.TransferToIdType(DEventId(translated_event_id));
-
-            const bool different_states = target_fsm->_state != target_state;
-
-            if (!target_fsm->IsResetting() && target_fsm->ShouldSendResetOnTransition() && different_states) {
-                target_fsm->m_transition_after_reset = &local_transitioner;
-
-                target_fsm->_state = target_fsm->m_state_to_reset;
-                return target_fsm->m_state_to_reset;
-            } else {
-                return local_transitioner.Perform(*target_fsm);
-            }
-        }
-        
-        void ReportDone(bool nullify_current_state) const override {
-            if (nullify_current_state) {
-                target_fsm->_state = nullptr;
-            }
-
-            target_fsm->m_state_to_reset = nullptr;
-            target_fsm->m_is_fsm_active = false;
-        }
-
-        void RebindTransition() override {
-            if (const auto* state = target_fsm->FindState(id_to_resume)) {
-                target_state = state->Handle();
-            }
-        }
-
-        bool IsTransitionDangling() const override {
-            return target_fsm->HasState(id_to_resume);
-        }
-    };
-
-
-    template<typename OStateId, typename OEventId, typename DStateId, typename DEventId>
-    friend struct RemoteTransitionTarget;
-
-    using RemoteTransitionTargetPtr = std::unique_ptr<RemoteTransitionTargetBase>;
+    template<typename, typename, typename, typename>
+    friend class detail::RemoteTransitionTarget;
 
     struct LocalTransition {
         std::coroutine_handle<> state_to_resume{};
@@ -1273,7 +1236,7 @@ private:
     };
 
     struct RemoteTransition {
-        RemoteTransitionTargetPtr remote_target{};
+        detail::RemoteTransitionTargetPtr remote_target{};
     };
 
     struct NullTransition { };
@@ -1282,6 +1245,7 @@ private:
         std::variant<LocalTransition, RemoteTransition, NullTransition> m_data{};
 
     public:
+        Transitioner() : Transitioner(NullTransition{}) { }
         Transitioner(NullTransition) : m_data(std::in_place_type<NullTransition>) { }
         Transitioner(LocalTransition local) : m_data(local) { }
         Transitioner(RemoteTransition&& remote) : m_data(std::move(remote)) { }
@@ -1308,7 +1272,7 @@ private:
                         return local.state_to_resume;
                     }
                 } else if constexpr (std::is_same_v<T, RemoteTransition>) {
-                    const RemoteTransitionTargetBase& remote = *o.remote_target;
+                    const detail::RemoteTransitionTargetBase& remote = *o.remote_target;
                     return remote.TransitionOnRemote(&originating);
                 } else if constexpr(std::is_same_v<T, NullTransition>) {
                     return originating._state;
@@ -1326,24 +1290,27 @@ private:
                     originating.m_state_to_reset = nullptr;
                     originating.m_is_fsm_active = false;
                 } else if constexpr(std::is_same_v<T, RemoteTransition>) {
-                    const RemoteTransitionTargetBase& remote = *o.remote_target;
+                    const detail::RemoteTransitionTargetBase& remote = *o.remote_target;
                     remote.ReportDone(nullify_current_state);
                 }
             }, m_data);
         }
 
-        void Rebind(FSM& originating) {
-            return std::visit([&originating]<typename T>(const T& o) {
+        bool Rebind(FSM& originating) {
+            return std::visit([&originating]<typename T>(T& o) {
                 if constexpr (std::is_same_v<T, LocalTransition>) {
-                    const LocalTransition& local = o;
+                    LocalTransition& local = o;
                     
                     if (State_t* state = originating.FindState(local.id_to_resume)) {
                         local.state_to_resume = state->Handle();
+                        return true;
                     }
                 } else if constexpr(std::is_same_v<T, RemoteTransition>) {
-                    const RemoteTransitionTargetBase& remote = *o.remote_target;
-                    remote.RebindTransition();
+                    detail::RemoteTransitionTargetBase& remote = *o.remote_target;
+                    return remote.RebindTransition();
                 }
+
+                return false;
             }, m_data);
         }
 
@@ -1355,13 +1322,13 @@ private:
             return std::holds_alternative<NullTransition>(m_data);
         }
 
-        bool IsDangling(FSM& originating) {
+        bool IsDangling(FSM& originating) const {
             return std::visit([&originating]<typename T>(const T& o) {
                 if constexpr (std::is_same_v<T, LocalTransition>) {
                     const LocalTransition& local = o;
-                    return originating.HasState(local.id_to_resume);
+                    return !originating.HasState(local.id_to_resume);
                 } else if constexpr(std::is_same_v<T, RemoteTransition>) {
-                    const RemoteTransitionTargetBase& remote = *o.remote_target;
+                    const detail::RemoteTransitionTargetBase& remote = *o.remote_target;
                     return remote.IsTransitionDangling();
                 } else {
                     return false;
@@ -1412,6 +1379,13 @@ private:
         return m_state_to_reset != nullptr;
     }
 
+    /// @brief Rebinds all transitions, including dangling ones, to the coroutine handle of the state with the target ID
+    void RebindTransitions() {
+        for (auto& [from, transitioner] : m_transition_table) {
+            transitioner.Rebind(*this);
+        }
+    }
+
     // If currently resetting, this will return the stored post-reset transition.
     // Else, it will suspend entirely.
     std::coroutine_handle<> CommonAwaitSuspend() {
@@ -1460,6 +1434,9 @@ private:
         }
     }
 
+    std::string _name;       // Name of the FSM (for information only)
+    StateHandle _state = nullptr; // Current state (for information only)
+    
     // Transition table in format {from-state, event} -> to-state
     // That is, an event sent from from-state will be routed to to-state.
     std::unordered_map<PartialTransition, Transitioner, PartialTransitionHash> m_transition_table{};
@@ -1477,6 +1454,78 @@ private:
     // Temporary event storage to be captured by Awaitable on resume
     Event_t m_event_for_next_resume{};
 }; // FSM
+
+namespace detail {
+    // O... = Origin, D... = Destination
+    template<typename OStateId, typename OEventId, typename DStateId, typename DEventId>
+    class RemoteTransitionTarget final : public RemoteTransitionTargetBase {
+        using DFSM_t = FSM<DStateId, DEventId>;
+
+        DFSM_t* target_fsm{};
+        typename DFSM_t::Transitioner local_transitioner{};
+        typename DFSM_t::StateHandle target_state{};
+        DStateId id_to_resume{};
+        DEventId translated_event_id;
+
+    public:
+        RemoteTransitionTarget(
+            DFSM_t& target_fsm,
+            typename DFSM_t::StateHandle target_state,
+            DStateId id_to_resume,
+            DEventId translated_id)
+            : target_fsm(&target_fsm),
+              local_transitioner(typename DFSM_t::LocalTransition{target_state}),
+              target_state(target_state),
+              id_to_resume(std::move(id_to_resume)),
+              translated_event_id(std::move(translated_id))
+        { }
+
+        std::coroutine_handle<> TransitionOnRemote(void* originating_fsm_ptr) const override {
+            auto& originating_fsm = *static_cast<FSM<OStateId, OEventId>*>(originating_fsm_ptr);
+            // Translate the event to the EventId type of the target FSM,
+            // then store it into the target FSM
+            auto& originating_event = originating_fsm.m_event_for_next_resume;
+            auto& target_event = target_fsm->m_event_for_next_resume;
+
+            target_event = originating_event.TransferToIdType(DEventId(translated_event_id));
+
+            const bool different_states = target_fsm->_state != target_state;
+
+            if (!target_fsm->IsResetting() && target_fsm->ShouldSendResetOnTransition() && different_states) {
+                target_fsm->m_transition_after_reset = &local_transitioner;
+
+                target_fsm->_state = target_fsm->m_state_to_reset;
+                return target_fsm->m_state_to_reset;
+            } else {
+                return local_transitioner.Perform(*target_fsm);
+            }
+        }
+        
+        void ReportDone(bool nullify_current_state) const override {
+            if (nullify_current_state) {
+                target_fsm->_state = nullptr;
+            }
+
+            target_fsm->m_state_to_reset = nullptr;
+            target_fsm->m_is_fsm_active = false;
+        }
+
+        bool RebindTransition() override {
+            if (const auto* state = target_fsm->FindState(id_to_resume)) {
+                target_state = state->Handle();
+                local_transitioner = typename DFSM_t::LocalTransition{target_state};
+
+                return true;
+            }
+
+            return false;
+        }
+
+        bool IsTransitionDangling() const override {
+            return !target_fsm->HasState(id_to_resume);
+        }
+    };
+}
 
 } // namespace dxfsm
 #endif // DXFSM_HPP

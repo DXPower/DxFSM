@@ -5,6 +5,7 @@ add_executable(dxfsm_tests)
 target_sources(dxfsm_tests PRIVATE
     collatz.cpp
     event.cpp
+    rebind.cpp
     remote.cpp
     resets.cpp
 )
