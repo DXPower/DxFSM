@@ -625,7 +625,7 @@ public:
     using StateHandle = typename State_t::handle_type;
 
     FSM() = default;
-    FSM(std::string human_name) : _name(std::move(human_name)) { }
+    FSM(std::string human_name) : m_name(std::move(human_name)) { }
 
     // Non-moveable, non-copyable
     // This is done because the awaiters and remote transitions hold FSM*.
@@ -636,22 +636,17 @@ public:
     FSM& operator=(FSM&&) = delete;
 
     /// @brief Gets the human-readable name
-    std::string_view Name() const { return _name; }
+    std::string_view Name() const { return m_name; }
 
     /// @brief Sets the human-readable name
-    FSM& Name(std::string name) { _name = std::move(name); return *this;}
+    FSM& Name(std::string name) { m_name = std::move(name); return *this;}
 
     /// @brief Gets the current state of the FSM, `nullptr` if there is no current state
     /// @details If the previous resumption of the state machine resulted in an abominable state
     /// being created (unhandled exception was thrown from it), then the current state is cleared.
     /// In other words, the current state will never be abominable.
     auto GetCurrentState() const -> const State_t* {
-        if (!_state) {
-            return nullptr;
-        }
-        
-        // TODO: Rework how this information is stored
-        return FindState(_state.promise().id);
+        return m_cur_state;
     }
 
     /// @brief Sets the current state of the FSM.
@@ -669,7 +664,7 @@ public:
                 Name()
             ));
         
-        _state = state->Handle();
+        m_cur_state = state;
         return *this;
     }
 
@@ -683,12 +678,12 @@ public:
     FSM& AddTransition(StateId from, EventId event, StateId to) {
         // auto from_handle = from.GetHandle(*this);
         // TODO: add check
-        auto from_handle = FindState(from)->Handle();
+        // auto from_handle = FindState(from)->Handle();
         auto to_handle = FindState(to)->Handle();
 
         m_transition_table.emplace(
             PartialTransition{
-                .from = from_handle,
+                .from = std::move(from),
                 .event = std::move(event)
             },
             LocalTransition{to_handle, to}
@@ -739,7 +734,7 @@ public:
 
         m_transition_table.emplace(
             PartialTransition{
-                .from = from_handle,
+                .from = std::move(from_state),
                 .event = std::move(from_event)
             },
             RemoteTransition{std::move(target)}
@@ -1254,12 +1249,13 @@ private:
             return std::visit([&originating, this]<typename T>(const T& o) -> std::coroutine_handle<> {
                 if constexpr (std::is_same_v<T, LocalTransition>) {
                     const LocalTransition& local = o;
-                    const bool different_states = originating._state != local.state_to_resume;
+                    const bool different_states = originating.m_cur_state == nullptr
+                        || originating.m_cur_state->Handle() != local.state_to_resume;
 
                     // Trigger a reset if needed
                     if (!originating.IsResetting() && originating.ShouldSendResetOnTransition() && different_states) {
                         originating.m_transition_after_reset = this;
-                        originating._state = originating.m_state_to_reset;
+                        originating.m_cur_state = originating.m_state_to_reset.promise().self;
                         return originating.m_state_to_reset;
                     } else {
                         // If we get here while resetting, that means the reset is done and can be cleared
@@ -1268,14 +1264,14 @@ private:
                             originating.m_state_to_reset = nullptr;
                         }
 
-                        originating._state = StateHandle::from_address(local.state_to_resume.address());
+                        originating.m_cur_state = StateHandle::from_address(local.state_to_resume.address()).promise().self;
                         return local.state_to_resume;
                     }
                 } else if constexpr (std::is_same_v<T, RemoteTransition>) {
                     const detail::RemoteTransitionTargetBase& remote = *o.remote_target;
                     return remote.TransitionOnRemote(&originating);
                 } else if constexpr(std::is_same_v<T, NullTransition>) {
-                    return originating._state;
+                    return originating.m_cur_state->Handle();
                 }
             }, m_data);
         }
@@ -1284,7 +1280,7 @@ private:
             return std::visit([&originating, nullify_current_state]<typename T>(const T& o) {
                 if constexpr (std::is_same_v<T, LocalTransition> || std::is_same_v<T, NullTransition>) {
                     if (nullify_current_state) {
-                        originating._state = nullptr;
+                        originating.m_cur_state = nullptr;
                     }
 
                     originating.m_state_to_reset = nullptr;
@@ -1339,7 +1335,8 @@ private:
     };
 
     const Transitioner& GetTransitioner(const Event_t& event) const noexcept {
-        if (auto it = m_transition_table.find({_state, event.GetId()}); it != m_transition_table.end())
+        // TODO: Implement transparent compare
+        if (auto it = m_transition_table.find({m_cur_state->Id(), event.GetId()}); it != m_transition_table.end())
             return it->second;
         else
             return null_transition; // No coded state transition, return null transition
@@ -1347,7 +1344,7 @@ private:
 
     // The 'from' and 'event' of a transition
     struct PartialTransition {
-        StateHandle from;
+        StateId from;
         EventId event;
 
         bool operator==(const PartialTransition& rhs) const = default;
@@ -1356,7 +1353,7 @@ private:
     struct PartialTransitionHash
     {
         std::size_t operator() (const PartialTransition& t) const noexcept {
-            std::size_t lhs = std::hash<void*>()(t.from.address());
+            std::size_t lhs = std::hash<StateId>()(t.from);
 
             // Activate ADL
             using std::hash;
@@ -1434,8 +1431,8 @@ private:
         }
     }
 
-    std::string _name;       // Name of the FSM (for information only)
-    StateHandle _state = nullptr; // Current state (for information only)
+    std::string m_name{};
+    State_t* m_cur_state{};
     
     // Transition table in format {from-state, event} -> to-state
     // That is, an event sent from from-state will be routed to to-state.
@@ -1489,12 +1486,13 @@ namespace detail {
 
             target_event = originating_event.TransferToIdType(DEventId(translated_event_id));
 
-            const bool different_states = target_fsm->_state != target_state;
+            const bool different_states = target_fsm->m_cur_state == nullptr
+                || target_fsm->m_cur_state->Handle() != target_state;
 
             if (!target_fsm->IsResetting() && target_fsm->ShouldSendResetOnTransition() && different_states) {
                 target_fsm->m_transition_after_reset = &local_transitioner;
 
-                target_fsm->_state = target_fsm->m_state_to_reset;
+                target_fsm->m_cur_state = target_fsm->m_state_to_reset.promise().self;
                 return target_fsm->m_state_to_reset;
             } else {
                 return local_transitioner.Perform(*target_fsm);
@@ -1503,7 +1501,7 @@ namespace detail {
         
         void ReportDone(bool nullify_current_state) const override {
             if (nullify_current_state) {
-                target_fsm->_state = nullptr;
+                target_fsm->m_cur_state = nullptr;
             }
 
             target_fsm->m_state_to_reset = nullptr;
