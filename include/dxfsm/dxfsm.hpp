@@ -420,10 +420,10 @@ public:
         promise_type() = delete; // State must take FSM& and Id parameters
 
         // Define both member and non-member functions
-        template<typename EventId> 
-        promise_type(FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id) : id(id) { }
-        template<typename Self, typename EventId> 
-        promise_type(Self&&, FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id) : id(id) { }
+        template<typename EventId, typename... Args> 
+        promise_type(FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id, Args&&...) : id(id) { }
+        template<typename Self, typename EventId, typename... Args> 
+        promise_type(Self&&, FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id, Args&&...) : id(id) { }
 
         std::suspend_never initial_suspend() noexcept { return {}; }
         constexpr std::suspend_always final_suspend() noexcept { return {}; }
@@ -663,6 +663,9 @@ public:
                 state->Name(),
                 Name()
             ));
+        else if (m_is_fsm_active)
+            throw std::runtime_error("Cannot change the current state while FSM is active");
+
         
         m_cur_state = state;
         return *this;
@@ -676,10 +679,13 @@ public:
     /// The combination of (from, event) forms a unique transition. If such a transition already exists,
     /// then its target \p to will be replaced.
     FSM& AddTransition(StateId from, EventId event, StateId to) {
-        // auto from_handle = from.GetHandle(*this);
-        // TODO: add check
-        // auto from_handle = FindState(from)->Handle();
-        auto to_handle = FindState(to)->Handle();
+        auto to_handle = [&]() -> StateHandle {
+            if (State_t* state = FindState(to)) {
+                return state->Handle();
+            } else {
+                return nullptr;
+            }
+        }();
 
         m_transition_table.emplace(
             PartialTransition{
@@ -720,10 +726,16 @@ public:
         FSM<DStateId, DEventId>& remote_fsm,
         DStateId to_state,
         DEventId translated_event) {
+        
+        using Remote_t = FSM<DStateId, DEventId>;
 
-        // TODO: add checks
-        auto from_handle = FindState(from_state)->Handle();
-        auto to_handle = remote_fsm.FindState(to_state)->Handle();
+        auto to_handle = [&]() -> Remote_t::StateHandle {
+            if (typename Remote_t::State_t* state = remote_fsm.FindState(to_state)) {
+                return state->Handle();
+            } else {
+                return nullptr;
+            }
+        }();
 
         auto target = std::make_unique<detail::RemoteTransitionTarget<StateId, EventId, DStateId, DEventId>>(
             remote_fsm,
@@ -1047,21 +1059,27 @@ public:
     /// @brief Adds a state to the FSM.
     /// @details See State for details on how one should be created.
     FSM& AddState(State_t&& state) {
-        // TODO: readd
-        // if (hasState(state.Name()))
-        //     throw std::runtime_error(std::format(
-        //         "A state with name '{}' already exists in FSM {}",
-        //         state.Name(),
-        //         _name
-        //     ));
-
-        if (state.Handle()) {
-            m_states.push_back(std::move(state));
-            RebindLocalTransitions();
-        } else {
-            throw std::runtime_error(std::format("Attempt to add an empty state to FSM '{}'", Name()));
+        if (HasState(state.Id())) {
+            throw std::runtime_error("Attempt to add a state with a conflicting id to FSM");
         }
+
+        if (!state.Handle())
+            throw std::runtime_error(std::format("Attempt to add an empty state to FSM '{}'", Name()));
+
+        // Save the index of the current state to update the pointer after push_back
+        auto cur_state_idx = [this]() -> std::optional<std::size_t> {
+            if (m_cur_state != nullptr)
+                return m_cur_state - m_states.data();
+            else
+                return std::nullopt;
+        }();
+
+        m_states.push_back(std::move(state));
+        RebindLocalTransitions();
         
+        if (cur_state_idx.has_value())
+            m_cur_state = &m_states[*cur_state_idx];
+
         return *this;
     }
 
@@ -1079,7 +1097,7 @@ public:
     /// by this function call, that State will be marked "abominable", then the exception will
     /// be rethrown from that call. The abominable state should be removed and readded before
     /// it is resumed, otherwise it results in undefined behavior.
-    /// @todo Detect no current state, empty event, and abominable states in resumption
+    /// @todo Should this detect no current state/abominable states?
     template<std::invocable<Event_t&> F>
     FSM& InsertEvent(F&& event_initializer) {
         std::forward<F>(event_initializer)(m_event_for_next_resume);

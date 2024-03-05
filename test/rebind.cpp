@@ -10,7 +10,7 @@ namespace {
     };
 
     enum class ToStates {
-        TM, TT
+        TM, TT, TU
     };
 
     enum class FromEvents {
@@ -31,11 +31,12 @@ namespace {
         bool throw_on_resume{};
 
         From() {
+            // Intentionally add transition before states to test rebinding on AddState
             fsm
                 .Name("FromFSM")
+                .AddTransition(FromStates::FM, FromEvents::FE, FromStates::FT)
                 .AddState(Main(fsm, FromStates::FM))
-                .AddState(Main(fsm, FromStates::FT))
-                .AddTransition(FromStates::FM, FromEvents::FE, FromStates::FT);
+                .AddState(Main(fsm, FromStates::FT));
 
             fsm.SetCurrentState(FromStates::FM);
         }
@@ -68,11 +69,12 @@ namespace {
         bool throw_on_resume{};
 
         To() {
+            // Intentionally add transition before states to test rebinding on AddState
             fsm
                 .Name("ToFSM")
+                .AddTransition(ToStates::TM, ToEvents::TE, ToStates::TT)
                 .AddState(Main(fsm, ToStates::TM))
-                .AddState(Main(fsm, ToStates::TT))
-                .AddTransition(ToStates::TM, ToEvents::TE, ToStates::TT);
+                .AddState(Main(fsm, ToStates::TT));
 
             fsm.SetCurrentState(ToStates::TM);
         }
@@ -151,5 +153,9 @@ TEST_CASE("Dangling remote transition", "[exceptions][advanced][remote]") {
     SECTION("Delete dangling transition") {
         CHECK(from.fsm.RemoveDanglingTransitions() == 1);
         CHECK(to.fsm.RemoveDanglingTransitions() == 1);
+    }
+
+    SECTION("Add remote transition before state") {
+        from.fsm.AddRemoteTransition(FromStates::FM, FromEvents::FR, to.fsm, ToStates::TU, ToEvents::TR);
     }
 }

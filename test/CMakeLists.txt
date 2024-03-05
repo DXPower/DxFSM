@@ -8,6 +8,7 @@ target_sources(dxfsm_tests PRIVATE
     rebind.cpp
     remote.cpp
     resets.cpp
+    usage_errors.cpp
 )
 
 target_link_libraries(dxfsm_tests PRIVATE dxfsm Catch2::Catch2WithMain)
