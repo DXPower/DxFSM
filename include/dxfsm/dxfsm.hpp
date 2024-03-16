@@ -438,8 +438,11 @@ public:
             throw std::runtime_error("State coroutine is not allowed to co_return.");
         }
 
-        State* self;
-        StateId id;
+        State* self{};
+        StateId id{};
+
+        // // Used to prevent resettable awaitables from altering the 
+        // bool is_constructing{};
     };
 
 private:
@@ -652,6 +655,7 @@ public:
     /// @brief Sets the current state of the FSM.
     /// @details The previous state will remain in its prior stage in execution; ie.,
     /// no resumption or restart occurs on the former current state.
+    /// @todo SetCurrentState can trigger reset
     FSM& SetCurrentState(StateId id) {
         auto* state = FindState(id);
 
@@ -1079,6 +1083,46 @@ public:
         
         if (cur_state_idx.has_value())
             m_cur_state = &m_states[*cur_state_idx];
+
+        return *this;
+    }
+
+    FSM& RemoveState(StateId id) {
+        const auto erase_it = std::ranges::find(m_states, id, &State_t::Id);
+        
+        if (erase_it == m_states.end()) {
+            throw std::runtime_error("Attempt to remove nonexistent state");
+        } else if (&*erase_it == m_cur_state && m_is_fsm_active) {
+            throw std::runtime_error("Cannot delete state while it is running");
+        }
+
+        // Save the index of the current state to update the pointer after erase
+        const auto cur_state_idx = [&, this]() -> std::optional<std::size_t> {
+            if (m_cur_state != nullptr) {
+                auto idx = m_cur_state - m_states.data();
+                auto order = idx <=> std::distance(m_states.begin(), erase_it);
+                
+                if (order < 0)
+                    return idx;
+                else if (order > 0)
+                    return idx - 1; // Shift by 1 since the index is after the erased element
+                else
+                    return std::nullopt; // The current state is the one being erased
+            } else {
+                return std::nullopt;
+            }
+        }();
+
+        m_states.erase(erase_it);
+        RebindLocalTransitions();
+        
+        if (cur_state_idx.has_value()) {
+            m_cur_state = &m_states[*cur_state_idx];
+        } else {
+            // If the current state is being deleted, make sure we clear reset variable too
+            m_state_to_reset = nullptr;
+            m_cur_state = nullptr;
+        }
 
         return *this;
     }

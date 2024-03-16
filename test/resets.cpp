@@ -394,13 +394,40 @@ namespace {
     };
 }
 
-TEST_CASE("Other Resettable Awaitables", "[advanced][resets]") {
+TEST_CASE("Other Resettable Awaitables", "[advanced][resets][rebinding]") {
     OtherResets resets{};
 
     int counter = 1;
     resets.fsm.InsertEvent(EventId::InnerStep, counter++);
     resets.fsm.InsertEvent(EventId::InnerStep, counter++);
     resets.fsm.InsertEvent(EventId::Jump, counter++);
+    resets.fsm.InsertEvent(EventId::Jump, counter++);
+
+    // Test removing states with resets involved
+    resets.fsm.RemoveState("One"); // Current state at this point
+    CHECK(resets.fsm.GetCurrentState() == nullptr);
+
+    resets.fsm.AddState(resets.StateFunc(resets.fsm, "One"));
+    resets.fsm.SetCurrentState("One");
+
+    // This should move it to Ignored then ReceivedReset
+    resets.fsm.InsertEvent(EventId::InnerStep, counter++);
+    
+    resets.fsm.RemoveState("One"); // Current state at this point
+    CHECK(resets.fsm.GetCurrentState() == nullptr);
+
+    resets.fsm.AddState(resets.StateFunc(resets.fsm, "One"));
+    resets.fsm.SetCurrentState("One");
+
+    resets.fsm.InsertEvent(EventId::InnerStep, counter++);
+    resets.fsm.InsertEvent(EventId::InnerStep, counter++);
+
+    resets.fsm.RemoveState("Two");
+    REQUIRE(resets.fsm.GetCurrentState() != nullptr);
+    CHECK(resets.fsm.GetCurrentState()->Id() == "Two");
+
+    resets.fsm.AddState(resets.StateFunc(resets.fsm, "Two"));
+
     resets.fsm.InsertEvent(EventId::Jump, counter++);
 
     CHECK_THAT(resets.actions, Catch::Matchers::Equals(std::vector{
@@ -410,5 +437,14 @@ TEST_CASE("Other Resettable Awaitables", "[advanced][resets]") {
         Action{"Two", ActionType::Received, 3},
         Action{"Two", ActionType::IgnoredReset, -1},
         Action{"One", ActionType::Ignored, -1},
+        // One was removed and readded here
+        Action{"One", ActionType::Received, 5},
+        // One was removed and readded here
+        Action{"One", ActionType::Received, 6},
+        Action{"One", ActionType::Ignored, -1},
+        // Two was removed and readded here
+        Action{"One", ActionType::ReceivedReset, -1},
+        Action{"Two", ActionType::Received, 9},
+
     }));
 }

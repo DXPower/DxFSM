@@ -98,7 +98,7 @@ namespace {
     };
 }
 
-TEST_CASE("Dangling local transition", "[exceptions][advanced]") {
+TEST_CASE("Dangling local transition", "[exceptions][advanced][rebinding]") {
     From from{};
     from.throw_on_resume = true;
 
@@ -124,7 +124,7 @@ TEST_CASE("Dangling local transition", "[exceptions][advanced]") {
     }
 }
 
-TEST_CASE("Dangling remote transition", "[exceptions][advanced][remote]") {
+TEST_CASE("Dangling remote transition", "[exceptions][advanced][remote][rebinding]") {
     From from{};
     To to{};
     to.throw_on_resume = true;
