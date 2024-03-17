@@ -425,7 +425,7 @@ public:
         template<typename Self, typename EventId, typename... Args> 
         promise_type(Self&&, FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id, Args&&...) : id(id) { }
 
-        std::suspend_never initial_suspend() noexcept { return {}; }
+        constexpr std::suspend_always initial_suspend() noexcept { return {}; }
         constexpr std::suspend_always final_suspend() noexcept { return {}; }
         State get_return_object() noexcept { return State(this); };
         void unhandled_exception() { 
@@ -808,16 +808,26 @@ public:
     /// is not relevant for end-users of this library.
     struct EmitReceiveAwaitable {
         FSM* self{};
-        Event_t* event_return{};
+        Event_t* event_source{};
+        std::coroutine_handle<> next_state{};
 
-        constexpr bool await_ready() {return false;}
+        bool await_ready() {
+            auto res = self->CommonEmittingAwaitReady(std::move(*event_source));
+
+            // Save the next_state in the awaiter in-case we suspend,
+            // that way it can return the coroutine_handle from there
+            next_state = res.next_state;
+            return !res.should_suspend;
+        }
+
         std::coroutine_handle<> await_suspend(StateHandle) {
-            return self->CommonEmittingAwaitSuspend();
+            self->m_is_fsm_active = false;
+            return next_state;
         }
 
         void await_resume() {
             self->m_is_fsm_active = true;
-            *event_return = std::move(self->m_event_for_next_resume);
+            *event_source = std::move(self->m_event_for_next_resume);
         }
     };
 
@@ -833,8 +843,8 @@ public:
             throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
         }
 
-        if (!IsResetting()) {
-            m_event_for_next_resume = std::move(event);
+        if (event.Empty()) {
+            TakeLargestEventStorage(std::move(event));
         }
 
         return EmitReceiveAwaitable{this, &event};
@@ -845,21 +855,38 @@ public:
     /// is not relevant for end-users of this library.
     struct EmitReceiveResettableAwaitable {
         FSM* self{};
-        Event_t* event_return{};
+        Event_t* event_source{};
+        std::coroutine_handle<> next_state{};
 
-        constexpr bool await_ready() {return false;}
+        bool await_ready() {
+            // Save the current state to reset so the transitioner can detect a reset
+            self->m_state_to_reset = self->m_cur_state->Handle();
+            auto res = self->CommonEmittingAwaitReady(std::move(*event_source));
+
+            if (res.should_suspend) {
+                // Save these variables on suspend for await_suspend to pick up
+                next_state = res.next_state;
+                return false;
+            } else {
+                // Clear the fact that this state may be reset if 
+                self->m_state_to_reset = nullptr;
+                return true;
+            }
+        }
+
         std::coroutine_handle<> await_suspend(StateHandle from_state) {
             self->m_state_to_reset = from_state;
-            return self->CommonEmittingAwaitSuspend();            
+            self->m_is_fsm_active = false;
+            return next_state;          
         }
 
         [[nodiscard]] ResetToken await_resume() {
             auto reset_token = self->CommonResettableAwaitResume();
 
             if (reset_token.ShouldReset()) {
-                event_return->Clear();
+                event_source->Clear();
             } else {
-                *event_return = std::move(self->m_event_for_next_resume);
+                *event_source = std::move(self->m_event_for_next_resume);
             }
 
             return reset_token;
@@ -882,10 +909,6 @@ public:
             throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
         }
 
-        if (!IsResetting()) {
-            m_event_for_next_resume = std::move(event);
-        }
-
         return EmitReceiveResettableAwaitable{this, &event};
     }
     
@@ -898,7 +921,7 @@ public:
         Event_t* event_return;
 
         bool await_ready() {
-            return false;
+            return self->CommonAwaitReady();
         }
 
         std::coroutine_handle<> await_suspend(StateHandle) {
@@ -921,8 +944,9 @@ public:
         // call to InsertEvent or EmitAndReceive
         if (!IsResetting()) {
             event_out.Clear(); // Clear the previous event
-            m_event_for_next_resume = std::move(event_out);
+            TakeLargestEventStorage(std::move(event_out));
         }
+
         return ReceiveAwaitable{this, &event_out};
     }
     
@@ -934,7 +958,7 @@ public:
         Event_t* event_return;
 
         bool await_ready() {
-            return false;
+            return self->CommonAwaitReady();
         }
 
         std::coroutine_handle<> await_suspend(StateHandle from_state) {
@@ -965,8 +989,9 @@ public:
         // call to InsertEvent or EmitAndReceive
         if (!IsResetting()) {
             event_out.Clear(); // Clear the previous event
-            m_event_for_next_resume = std::move(event_out);
+            TakeLargestEventStorage(std::move(event_out));
         }
+        
         return ReceiveResettableAwaitable{this, &event_out};
     }
 
@@ -976,8 +1001,8 @@ public:
     struct InitialReceiveAwaitable {
         FSM* self;
 
-        static constexpr bool await_ready() {
-            return false;
+        bool await_ready() {
+            return self->CommonAwaitReady();
         }
 
         std::coroutine_handle<> await_suspend(StateHandle) {
@@ -1007,8 +1032,8 @@ public:
     struct IgnoreAwaitable {
         FSM* self;
 
-        static constexpr bool await_ready() {
-            return false;
+        bool await_ready() {
+            return self->CommonAwaitReady();
         }
 
         std::coroutine_handle<> await_suspend(StateHandle) {
@@ -1035,8 +1060,8 @@ public:
     struct IgnoreResettableAwaitable {
         FSM* self;
 
-        static constexpr bool await_ready() {
-            return false;
+        bool await_ready() {
+            return self->CommonAwaitReady();
         }
 
         std::coroutine_handle<> await_suspend(StateHandle from_state) {
@@ -1431,7 +1456,7 @@ private:
     }
 
     bool ShouldResumeRespondWithReset() const {
-        return m_state_to_reset != nullptr && m_transition_after_reset != nullptr;
+        return m_transition_after_reset != nullptr;
     }
 
     bool ShouldSendResetOnTransition() const {
@@ -1463,24 +1488,44 @@ private:
         return transitioner->Perform(*this);
     }
 
+    // If currently resetting, this will always return false.
+    // Otherwise, this will return true if there is an event ready
+    bool CommonAwaitReady() {
+        return !IsResetting() && not m_event_for_next_resume.Empty();
+    }
+
     // If currently resetting, this will resume the stored post-reset transition.
     // Else, it will check the pending event and perform its transitioner
-    std::coroutine_handle<> CommonEmittingAwaitSuspend() {
-        m_is_fsm_active = false;
+    auto CommonEmittingAwaitReady(Event_t&& pending_event) {
+        struct Result {
+            std::coroutine_handle<> next_state{};
+            bool should_suspend{};
+        };
 
-        const Event_t& pending_event = m_event_for_next_resume;
-        
         // If this state sends an empty event and we're not resetting,
         // then suspend the FSM
         if (pending_event.Empty() && !IsResetting()) {
-            return std::noop_coroutine();
+            return Result{std::noop_coroutine(), true};
         }
 
         const Transitioner& transitioner = IsResetting()
             ? *m_transition_after_reset
             : GetTransitioner(pending_event);
 
-        return transitioner.Perform(*this);
+        if (!IsResetting()) {
+            // Store the event into the FSM to be picked up by the transitioner
+            // Gate by !IsResetting() so we don't overwrite the original event
+            // that triggered the reset
+            m_event_for_next_resume = std::move(pending_event);
+        }
+
+        // Save cur_state here because transitioner.Perform() may update m_cur_state
+        const auto cur_state = m_cur_state->Handle();
+
+        Result res{};
+        res.next_state = transitioner.Perform(*this);
+        res.should_suspend = cur_state != res.next_state;
+        return res;
     }
 
     ResetToken CommonResettableAwaitResume() {
@@ -1491,6 +1536,18 @@ private:
         } else {
             m_state_to_reset = nullptr;
             return false;
+        }
+    }
+
+    // Takes the capacity of the input event if it is larger
+    // then the stored event capacity,
+    // but only if the stored event is empty.
+    void TakeLargestEventStorage(Event_t&& in) {
+        if (m_event_for_next_resume.Empty())
+            return;
+
+        if (in.Capacity() > m_event_for_next_resume.Capacity()) {
+            m_event_for_next_resume = std::move(in);
         }
     }
 

@@ -394,7 +394,7 @@ namespace {
     };
 }
 
-TEST_CASE("Other Resettable Awaitables", "[advanced][resets][rebinding]") {
+TEST_CASE("Other Resettable Awaitables", "[advanced][resets][rebinding][removing]") {
     OtherResets resets{};
 
     int counter = 1;
@@ -422,9 +422,10 @@ TEST_CASE("Other Resettable Awaitables", "[advanced][resets][rebinding]") {
     resets.fsm.InsertEvent(EventId::InnerStep, counter++);
     resets.fsm.InsertEvent(EventId::InnerStep, counter++);
 
+    // Removing non-current state doesn't affect current state
     resets.fsm.RemoveState("Two");
     REQUIRE(resets.fsm.GetCurrentState() != nullptr);
-    CHECK(resets.fsm.GetCurrentState()->Id() == "Two");
+    CHECK(resets.fsm.GetCurrentState()->Id() == "One");
 
     resets.fsm.AddState(resets.StateFunc(resets.fsm, "Two"));
 
@@ -444,7 +445,7 @@ TEST_CASE("Other Resettable Awaitables", "[advanced][resets][rebinding]") {
         Action{"One", ActionType::Ignored, -1},
         // Two was removed and readded here
         Action{"One", ActionType::ReceivedReset, -1},
-        Action{"Two", ActionType::Received, 9},
+        Action{"Two", ActionType::Received, 8},
 
     }));
 }

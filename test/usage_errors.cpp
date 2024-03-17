@@ -25,7 +25,7 @@ namespace {
     }
 }
 
-TEST_CASE("Basic usage error checking", "[basic][exceptions]") {
+TEST_CASE("Basic usage error checking", "[basic][exceptions][removing]") {
     using namespace Catch::Matchers;
 
     FSM_t fsm{};

@@ -1,6 +1,7 @@
 #include <dxfsm/dxfsm.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/matchers/catch_matchers_vector.hpp>
 
@@ -124,20 +125,31 @@ TEST_CASE("Dangling local transition", "[exceptions][advanced][rebinding]") {
     }
 }
 
-TEST_CASE("Dangling remote transition", "[exceptions][advanced][remote][rebinding]") {
+TEST_CASE("Dangling remote transition", "[exceptions][advanced][remote][rebinding][removing]") {
+    using Catch::Matchers::Equals;
+
     From from{};
     To to{};
     to.throw_on_resume = true;
 
     from.fsm.AddRemoteTransition(FromStates::FM, FromEvents::FR, to.fsm, ToStates::TT, ToEvents::TR);
 
-    using Catch::Matchers::Equals;
-    CHECK_THROWS_WITH(from.fsm.InsertEvent(FromEvents::FR), Equals("Throw!"));
+    enum class RemoveStrategy { Exception, Remove };
+    auto strat = GENERATE(RemoveStrategy::Exception, RemoveStrategy::Remove);
 
-    REQUIRE(to.fsm.FindState(ToStates::TT) != nullptr);
-    CHECK(to.fsm.FindState(ToStates::TT)->IsAbominable());
+    switch (strat) {
+    case RemoveStrategy::Exception:
+        CHECK_THROWS_WITH(from.fsm.InsertEvent(FromEvents::FR), Equals("Throw!"));
 
-    to.fsm.RemoveAbominableStates();
+        REQUIRE(to.fsm.FindState(ToStates::TT) != nullptr);
+        CHECK(to.fsm.FindState(ToStates::TT)->IsAbominable());
+
+        to.fsm.RemoveAbominableStates();
+        break;
+    case RemoveStrategy::Remove:
+        to.fsm.RemoveState(ToStates::TT);
+        break;
+    }
     
     SECTION("Readd state and remote rebind") {
         to.throw_on_resume = false;

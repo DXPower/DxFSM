@@ -68,11 +68,9 @@ struct CollatzFsm {
 
     State_t StateStart(FSM_t& fsm, StateId id) {
         // Specifically test using EmitAndReceive at beginning of loop
-        Event_t event{};
+        Event_t event = co_await fsm.ReceiveInitialEvent();
 
         while (true) {
-            co_await fsm.EmitAndReceive(event);
-
             sequence.clear();
             event_ids.clear();
 
@@ -81,6 +79,8 @@ struct CollatzFsm {
             auto start_value = event.Get<int>();
 
             event.Store(EventId::ProcessValue, start_value);
+
+            co_await fsm.EmitAndReceive(event);
         }
     }
 
