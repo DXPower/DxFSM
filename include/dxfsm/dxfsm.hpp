@@ -9,7 +9,6 @@
 #include <stdexcept>
 #include <type_traits>
 #include <functional>
-#include <vector>
 #include <cassert>
 #include <any>
 #include <optional>
@@ -17,6 +16,7 @@
 #include <algorithm>
 #include <variant>
 #include <ranges>
+#include <unordered_set>
 
 namespace dxfsm {
 namespace detail {
@@ -378,6 +378,11 @@ void swap(Event<Id>& lhs, Event<Id>& rhs) {
 template<typename StateId, typename EventId>
 class FSM;
 
+template<typename StateId>
+class State;
+
+template<typename StateId>
+class StateRet;
 namespace detail {
     struct DoneReporterBase {
         virtual ~DoneReporterBase() = default;
@@ -399,6 +404,32 @@ namespace detail {
     class RemoteTransitionTarget;
 
     using RemoteTransitionTargetPtr = std::unique_ptr<RemoteTransitionTargetBase>;
+
+    // template<typename StateId>
+    // struct StatePromiseType {
+    //     using handle_type = std::coroutine_handle<StatePromiseType>;
+    //     StateRet<StateId> return_object{};
+
+    //     StatePromiseType() = delete; // State must take FSM& and Id parameters
+
+    //     // Define both member and non-member functions
+    //     template<typename EventId, typename... Args> 
+    //     StatePromiseType(FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id, Args&&...) {
+    //         fsm.AddState(
+    //             State(handle_type::from_promise(this), id)
+    //         );
+    //     }
+
+    //     template<typename Self, typename EventId, typename... Args> 
+    //     StatePromiseType(Self&&, FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id, Args&&...) { }
+
+    //     constexpr std::suspend_always initial_suspend() noexcept { return {}; }
+    //     constexpr std::suspend_always final_suspend() noexcept { return {}; }
+
+    //     StateRet get_return_object() noexcept {
+
+    //     }
+    // };
 }
 
 // Return type of coroutines which represent states.
@@ -452,7 +483,6 @@ private:
     // Need a copy of the ID here in case the coroutine throws an exception, as the promise
     // object gets destroyed. This keeps the State object queryable for its identifying information.
     StateId m_id{};
-    std::string m_name{};
     bool m_is_abominable{};
 
     explicit State(promise_type *p) noexcept 
@@ -462,20 +492,22 @@ private:
         p->self = this;
     }
 
+    State(handle_type handle, StateId id) 
+        : m_coro_handle(handle), m_id(id) { }
+
 public:
     State(State&& other) noexcept 
         : m_coro_handle(std::exchange(other.m_coro_handle, nullptr)),
           m_id(std::exchange(other.m_id, {})),
-          m_name(std::exchange(other.m_name, {})),
           m_is_abominable(std::exchange(other.m_is_abominable, false)) 
     {
         m_coro_handle.promise().self = this;
     }
 
+    // TODO: Implement properly
     State& operator=(State&& other) noexcept {
         m_coro_handle = std::exchange(other.m_coro_handle, nullptr);
         m_id = std::exchange(other.m_id, {});
-        m_name = std::exchange(other.m_name, {});
         m_is_abominable = std::exchange(other.m_is_abominable, false);
         m_coro_handle.promise().self = this;
         return *this;
@@ -499,30 +531,6 @@ public:
         return m_id;
     }
 
-    /// @brief Sets the human-readable name.
-    State& Name(std::string state_name) & {
-        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
-            throw std::runtime_error("Attempt to set the name of State not associated with a coroutine");
-        }
-
-        m_name = std::move(state_name);
-        return *this;
-    }
-
-    /// @brief Sets the human-readable name.
-    State&& Name(std::string state_name) && {
-        return std::move(this->Name(state_name));
-    }
-
-    /// @brief Gets the human-readable name.
-    std::string_view Name() const {
-        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
-            throw std::runtime_error("Attempt to get the name of a State not associated with a coroutine");
-        }
-
-        return m_name;
-    }
-
     /// @brief Gets whether this state is abominable
     /// @details Abominable means that this state was killed due to an exception,
     /// and should be removed and possibly readded by the user.
@@ -542,8 +550,43 @@ private:
 
     template<typename, typename, typename, typename>
     friend class detail::RemoteTransitionTarget;
+
+    struct IdHash {
+        using is_transparent = void;
+
+        std::size_t operator()(const State& state) const {
+            using std::hash;
+            return hash<StateId>()(state.m_id);
+        }
+
+        std::size_t operator()(StateId id) const {
+            using std::hash;
+            return hash<StateId>()(id);
+        }
+    };
+
+    struct IdEq {
+        using is_transparent = void;
+
+        bool operator()(const State& lhs, const State& rhs) const {
+            return lhs.m_id == rhs.m_id;
+        }
+
+        bool operator()(StateId lhs, const State& rhs) const {
+            return lhs == rhs.m_id;
+        }
+
+        bool operator()(const State& lhs, StateId rhs) const {
+            return lhs.m_id == rhs;
+        }
+    };
 }; // State
 
+
+// template<typename StateId>
+// class StateRet {
+    
+// };
 
 class ResetToken {
     bool m_should_reset{};
@@ -657,16 +700,12 @@ public:
     /// no resumption or restart occurs on the former current state.
     /// @todo SetCurrentState can trigger reset
     FSM& SetCurrentState(StateId id) {
-        auto* state = FindState(id);
+        const auto* state = FindState(id);
 
         if (state == nullptr)
             throw std::runtime_error(std::format("Attempt to set nonexistent state on FSM '{}'", Name()));
         else if (state->IsAbominable())
-            throw std::runtime_error(std::format(
-                "Attempt to set abominable state '{}' as current on FSM '{}'",
-                state->Name(),
-                Name()
-            ));
+            throw std::runtime_error("Attempt to set abominable state as current on FSM");
         else if (m_is_fsm_active)
             throw std::runtime_error("Cannot change the current state while FSM is active");
 
@@ -684,7 +723,7 @@ public:
     /// then its target \p to will be replaced.
     FSM& AddTransition(StateId from, EventId event, StateId to) {
         auto to_handle = [&]() -> StateHandle {
-            if (State_t* state = FindState(to)) {
+            if (const State_t* state = FindState(to)) {
                 return state->Handle();
             } else {
                 return nullptr;
@@ -734,7 +773,7 @@ public:
         using Remote_t = FSM<DStateId, DEventId>;
 
         auto to_handle = [&]() -> Remote_t::StateHandle {
-            if (typename Remote_t::State_t* state = remote_fsm.FindState(to_state)) {
+            if (const auto* state = remote_fsm.FindState(to_state)) {
                 return state->Handle();
             } else {
                 return nullptr;
@@ -1083,8 +1122,6 @@ public:
         return IgnoreResettableAwaitable{this};
     }
 
-    // Adds a state to the state machine without associating any events with it.
-    // Returns the index of the vector to which the state was stored.
     /// @brief Adds a state to the FSM.
     /// @details See State for details on how one should be created.
     FSM& AddState(State_t&& state) {
@@ -1095,25 +1132,20 @@ public:
         if (!state.Handle())
             throw std::runtime_error(std::format("Attempt to add an empty state to FSM '{}'", Name()));
 
-        // Save the index of the current state to update the pointer after push_back
-        auto cur_state_idx = [this]() -> std::optional<std::size_t> {
-            if (m_cur_state != nullptr)
-                return m_cur_state - m_states.data();
-            else
-                return std::nullopt;
-        }();
-
-        m_states.push_back(std::move(state));
+        m_states.insert(std::move(state));
         RebindLocalTransitions();
-        
-        if (cur_state_idx.has_value())
-            m_cur_state = &m_states[*cur_state_idx];
 
         return *this;
     }
 
+    // // TODO: Implement properly
+    // State_t& EmplaceState(StateId id, StateHandle handle) {
+    //     AddState(State(id, handle));
+    //     return m_states.back();
+    // }
+
     FSM& RemoveState(StateId id) {
-        const auto erase_it = std::ranges::find(m_states, id, &State_t::Id);
+        const auto erase_it = m_states.find(id);
         
         if (erase_it == m_states.end()) {
             throw std::runtime_error("Attempt to remove nonexistent state");
@@ -1121,34 +1153,13 @@ public:
             throw std::runtime_error("Cannot delete state while it is running");
         }
 
-        // Save the index of the current state to update the pointer after erase
-        const auto cur_state_idx = [&, this]() -> std::optional<std::size_t> {
-            if (m_cur_state != nullptr) {
-                auto idx = m_cur_state - m_states.data();
-                auto order = idx <=> std::distance(m_states.begin(), erase_it);
-                
-                if (order < 0)
-                    return idx;
-                else if (order > 0)
-                    return idx - 1; // Shift by 1 since the index is after the erased element
-                else
-                    return std::nullopt; // The current state is the one being erased
-            } else {
-                return std::nullopt;
-            }
-        }();
-
-        m_states.erase(erase_it);
-        RebindLocalTransitions();
-        
-        if (cur_state_idx.has_value()) {
-            m_cur_state = &m_states[*cur_state_idx];
-        } else {
-            // If the current state is being deleted, make sure we clear reset variable too
+        if (&*erase_it == m_cur_state) {
             m_state_to_reset = nullptr;
             m_cur_state = nullptr;
         }
 
+        m_states.erase(erase_it);
+        RebindLocalTransitions();
         return *this;
     }
 
@@ -1213,19 +1224,13 @@ public:
         });
     }
 
-    
-    State_t* FindState(StateId id) {
-        auto it = std::ranges::find(m_states, id, &State_t::Id);
-        return it != m_states.end() ? &*it : nullptr;
-    }
-
     const State_t* FindState(StateId id) const {
-        auto it = std::ranges::find(m_states, id, &State_t::Id);
+        auto it = m_states.find(id);
         return it != m_states.end() ? &*it : nullptr;
     }
 
     bool HasState(StateId id) const {
-        return std::ranges::find(m_states, id, &State_t::Id) != m_states.end();
+        return m_states.find(id) != m_states.end();
     }
 
     /// @brief Returns a range that contains all abominable states.
@@ -1384,7 +1389,7 @@ private:
                 if constexpr (std::is_same_v<T, LocalTransition>) {
                     LocalTransition& local = o;
                     
-                    if (State_t* state = originating.FindState(local.id_to_resume)) {
+                    if (const State_t* state = originating.FindState(local.id_to_resume)) {
                         local.state_to_resume = state->Handle();
                         return true;
                     }
@@ -1437,8 +1442,7 @@ private:
         bool operator==(const PartialTransition& rhs) const = default;
     };
 
-    struct PartialTransitionHash
-    {
+    struct PartialTransitionHash {
         std::size_t operator() (const PartialTransition& t) const noexcept {
             std::size_t lhs = std::hash<StateId>()(t.from);
 
@@ -1552,13 +1556,13 @@ private:
     }
 
     std::string m_name{};
-    State_t* m_cur_state{};
+    const State_t* m_cur_state{};
     
     // Transition table in format {from-state, event} -> to-state
     // That is, an event sent from from-state will be routed to to-state.
     std::unordered_map<PartialTransition, Transitioner, PartialTransitionHash> m_transition_table{};
 
-    std::vector<State_t> m_states;
+    std::unordered_set<State_t, typename State_t::IdHash, typename State_t::IdEq> m_states;
     StateHandle m_state_to_reset{};
     const Transitioner* m_transition_after_reset{};
 

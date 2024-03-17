@@ -53,9 +53,9 @@ struct CollatzFsm {
 
     CollatzFsm() {
         fsm
-            .AddState(StateStart(fsm, StateId::Start).Name("Start"))
-            .AddState(StateProcess(fsm, StateId::Processing).Name("Processing"))
-            .AddState(StateFinish(fsm, StateId::Finish).Name("Finish"));
+            .AddState(StateStart(fsm, StateId::Start))
+            .AddState(StateProcess(fsm, StateId::Processing))
+            .AddState(StateFinish(fsm, StateId::Finish));
 
         fsm
             .AddTransition(StateId::Start, EventId::ProcessValue, StateId::Processing)

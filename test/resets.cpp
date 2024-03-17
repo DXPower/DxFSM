@@ -58,9 +58,9 @@ namespace {
         Resets() {
             // fsm.AddState(State_t &&state)
             fsm
-                .AddState(Cycler(fsm, "One").Name("OneState"))
-                .AddState(Cycler(fsm, "Two").Name("TwoState"))
-                .AddState(Cycler(fsm, "Three").Name("ThreeState"));
+                .AddState(Cycler(fsm, "One"))
+                .AddState(Cycler(fsm, "Two"))
+                .AddState(Cycler(fsm, "Three"));
 
             fsm
                 .AddTransition("One", EventId::OuterStep, "Two")
@@ -166,7 +166,6 @@ TEST_CASE("Resettable States", "[advanced][resets][exceptions]") {
     REQUIRE(failed_states.size() == 1);
     CHECK(failed_states[0]->IsAbominable());
     CHECK(failed_states[0]->Id() == "One");
-    CHECK(failed_states[0]->Name() == "OneState");
 }
 
 TEST_CASE("Resettable States with Remote Transitions", "[advanced][resets][remote][exceptions]") {
@@ -214,7 +213,6 @@ TEST_CASE("Resettable States with Remote Transitions", "[advanced][resets][remot
     REQUIRE(failed_states.size() == 1);
     CHECK(failed_states[0]->IsAbominable());
     CHECK(failed_states[0]->Id() == "One");
-    CHECK(failed_states[0]->Name() == "OneState");
 }
 
 TEST_CASE("Resettable States Resend Event", "[advanced][resets][exceptions]") {
@@ -304,7 +302,6 @@ TEST_CASE("Resettable States Remote Transitions Do Not Reset Local", "[advanced]
         REQUIRE(failed_states.size() == 1);
         CHECK(failed_states[0]->IsAbominable());
         CHECK(failed_states[0]->Id() == "One");
-        CHECK(failed_states[0]->Name() == "OneState");
 
         rb.fsm.ResendStoredEvent();
 
