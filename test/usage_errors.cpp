@@ -33,12 +33,12 @@ TEST_CASE("Basic usage error checking", "[basic][exceptions][removing]") {
     bool delete_on_resume = false;
     std::string_view state_to_set = "";
 
-    fsm.AddState(Main(fsm, "State", throw_on_resume, delete_on_resume, state_to_set));
+    Main(fsm, "State", throw_on_resume, delete_on_resume, state_to_set);
     fsm.SetCurrentState("State");
 
     SECTION("Duplicate state check") {
         CHECK_THROWS_WITH(
-            fsm.AddState(Main(fsm, "State", throw_on_resume, delete_on_resume, state_to_set)),
+            Main(fsm, "State", throw_on_resume, delete_on_resume, state_to_set),
             ContainsSubstring("conflicting id")
         );
     }
@@ -54,7 +54,7 @@ TEST_CASE("Basic usage error checking", "[basic][exceptions][removing]") {
     }
 
     SECTION("Set state while active") {
-        fsm.AddState(Main(fsm, "State2", throw_on_resume, delete_on_resume, state_to_set)),
+        Main(fsm, "State2", throw_on_resume, delete_on_resume, state_to_set);
         state_to_set = "State2";
         CHECK_THROWS_WITH(fsm.InsertEvent("Event"), ContainsSubstring("FSM is active"));
     }

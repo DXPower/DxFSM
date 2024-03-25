@@ -29,9 +29,9 @@ namespace {
 
         Light(std::string name, StateId on_state, StateId off_state) {
             fsm.Name(name);
-
-            fsm.AddState(StateOn(fsm, on_state))
-               .AddState(StateOff(fsm, off_state));
+            
+            StateOn(fsm, on_state);
+            StateOff(fsm, off_state);
 
             fsm.AddTransition(on_state, EventId::CycleIn, off_state)
                .AddTransition(off_state, EventId::CycleIn, on_state);
@@ -155,17 +155,15 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK_THROWS_WITH(red.fsm.InsertEvent([](auto& ev) { ev.Store(EventId::CycleOut, 0xDEAD); }), "DEAD!");
 
         auto CheckFailedStates = [&]<typename S, typename E>(const dxfsm::FSM<S, E>& fsm, std::string_view expected_id = "") {
-            std::vector<const dxfsm::State<S>*> failed_states{};
-            std::ranges::copy(fsm.GetAbominableStates() | std::views::transform([](const auto& s) {
-                return &s;
-            }), std::back_inserter(failed_states));
+            std::vector<typename dxfsm::FSM<S, E>::State_t> failed_states{};
+            std::ranges::copy(fsm.GetAbominableStates(), std::back_inserter(failed_states));
 
             if (expected_id == "") {
                 CHECK(failed_states.size() == 0);
             } else {
                 REQUIRE(failed_states.size() == 1);
-                CHECK(failed_states[0]->Id() == expected_id);
-                CHECK(failed_states[0]->IsAbominable());
+                CHECK(failed_states[0].Id() == expected_id);
+                CHECK(failed_states[0].IsAbominable());
             }
         };
 
@@ -177,10 +175,10 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK_FALSE(green.fsm.IsActive());
         CHECK_FALSE(blue.fsm.IsActive());
 
-        REQUIRE(red.fsm.GetCurrentState() != nullptr);
+        REQUIRE(red.fsm.GetCurrentState().has_value());
         CHECK(red.fsm.GetCurrentState()->Id() == "RedOn");
-        CHECK(green.fsm.GetCurrentState() == nullptr);
-        REQUIRE(blue.fsm.GetCurrentState() != nullptr);
+        CHECK_FALSE(green.fsm.GetCurrentState().has_value());
+        REQUIRE(blue.fsm.GetCurrentState().has_value());
         CHECK(blue.fsm.GetCurrentState()->Id() == "BlueOff");
     }
 }

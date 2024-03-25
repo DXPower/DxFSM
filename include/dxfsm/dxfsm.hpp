@@ -381,8 +381,6 @@ class FSM;
 template<typename StateId>
 class State;
 
-template<typename StateId>
-class StateRet;
 namespace detail {
     struct DoneReporterBase {
         virtual ~DoneReporterBase() = default;
@@ -405,188 +403,111 @@ namespace detail {
 
     using RemoteTransitionTargetPtr = std::unique_ptr<RemoteTransitionTargetBase>;
 
-    // template<typename StateId>
-    // struct StatePromiseType {
-    //     using handle_type = std::coroutine_handle<StatePromiseType>;
-    //     StateRet<StateId> return_object{};
+    template<typename StateId>
+    class StateCoro;
 
-    //     StatePromiseType() = delete; // State must take FSM& and Id parameters
+    template<typename StateId>
+    struct StatePromiseType {
+        using handle_type = std::coroutine_handle<StatePromiseType>;
+        using State_t = State<StateId>;
 
-    //     // Define both member and non-member functions
-    //     template<typename EventId, typename... Args> 
-    //     StatePromiseType(FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id, Args&&...) {
-    //         fsm.AddState(
-    //             State(handle_type::from_promise(this), id)
-    //         );
-    //     }
+        // This type is the same as StoredState below
+        std::pair<const StateId, StateCoro<StateId>>* self{};
 
-    //     template<typename Self, typename EventId, typename... Args> 
-    //     StatePromiseType(Self&&, FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id, Args&&...) { }
-
-    //     constexpr std::suspend_always initial_suspend() noexcept { return {}; }
-    //     constexpr std::suspend_always final_suspend() noexcept { return {}; }
-
-    //     StateRet get_return_object() noexcept {
-
-    //     }
-    // };
-}
-
-// Return type of coroutines which represent states.
-/// @brief The coroutine handle type that represents discrete states in the FSM
-/// @details This class should be the return type of each function intended to be a state in the FSM.
-/// This type is automatically constructed when the function is called (part of C++20 Coroutines).
-/// Once returned, it should be moved into the FSM via @ref FSM::AddState.
-/// The function may be a non-static member, but its signature must be:\n
-/// `State<StateId> Func(FSM<StateId, EventId>&, StateId id)`.
-/// @tparam StateId The type to use as the @ref State Id
-template<typename StateId>
-class State {
-public:
-    /// @brief The type automatically constructed by the C++20 Coroutines system when a
-    /// a coroutine returning State is called.
-    /// @details This type is automatically managed by C++20 Coroutines. It is of
-    /// no importance to an end-user of this library.
-    struct promise_type {
-        promise_type() = delete; // State must take FSM& and Id parameters
+        StatePromiseType() = delete; // State must take FSM& and Id parameters
 
         // Define both member and non-member functions
         template<typename EventId, typename... Args> 
-        promise_type(FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id, Args&&...) : id(id) { }
+        StatePromiseType(FSM<StateId, EventId>& fsm, StateId id, Args&&...) {
+            self = &fsm.EmplaceState(std::move(id), handle_type::from_promise(*this));
+        }
+
         template<typename Self, typename EventId, typename... Args> 
-        promise_type(Self&&, FSM<StateId, EventId>& fsm [[maybe_unused]], StateId id, Args&&...) : id(id) { }
+        StatePromiseType(Self&&, FSM<StateId, EventId>& fsm, StateId id, Args&&...) 
+            : StatePromiseType(fsm, id) { }
 
         constexpr std::suspend_always initial_suspend() noexcept { return {}; }
         constexpr std::suspend_always final_suspend() noexcept { return {}; }
-        State get_return_object() noexcept { return State(this); };
+
+        State<StateId> get_return_object() noexcept {
+            return State<StateId>(*self);
+        }
+
         void unhandled_exception() { 
-            self->m_is_abominable = true;
-            self->m_coro_handle = nullptr;
+            self->second.m_coro_handle = nullptr;
             throw;
         }
-        void return_void() {
-            // State coroutines must never return.
-            throw std::runtime_error("State coroutine is not allowed to co_return.");
+    };
+        
+    template<typename StateId>
+    class StateCoro {
+        using handle_type = std::coroutine_handle<StatePromiseType<StateId>>;
+        handle_type m_coro_handle{};
+
+    public:
+        StateCoro(handle_type handle) : m_coro_handle(handle) { }
+
+        StateCoro(const StateCoro&) = delete;
+        StateCoro(StateCoro&&) = delete;
+        StateCoro& operator=(const StateCoro&) = delete;
+        StateCoro& operator=(StateCoro&&) = delete;
+
+        ~StateCoro() {
+            if (m_coro_handle)
+                m_coro_handle.destroy();
         }
 
-        State* self{};
-        StateId id{};
+        /// @brief Gets whether this state is abominable
+        /// @details Abominable means that this state was killed due to an exception,
+        /// and should be removed and possibly readded by the user.
+        bool IsAbominable() const {
+            return m_coro_handle == nullptr;
+        }
 
-        // // Used to prevent resettable awaitables from altering the 
-        // bool is_constructing{};
+    private:
+        handle_type Handle() const noexcept { return m_coro_handle; }
+        operator handle_type() const noexcept { return m_coro_handle; }
+
+        template<typename S, typename E>
+        friend class dxfsm::FSM;
+
+        template<typename>
+        friend struct StatePromiseType;
+
+        template<typename, typename, typename, typename>
+        friend class detail::RemoteTransitionTarget;
     };
 
-private:
-    using handle_type = std::coroutine_handle<promise_type>;
+    template<typename StateId>
+    using StateMap = std::unordered_map<StateId, StateCoro<StateId>>;
 
-    handle_type m_coro_handle{};
-    // Need a copy of the ID here in case the coroutine throws an exception, as the promise
-    // object gets destroyed. This keeps the State object queryable for its identifying information.
-    StateId m_id{};
-    bool m_is_abominable{};
+    template<typename StateId>
+    using StoredState = StateMap<StateId>::value_type;
+}
 
-    explicit State(promise_type *p) noexcept 
-        : m_coro_handle(handle_type::from_promise(*p)),
-          m_id(p->id)
-    {
-        p->self = this;
-    }
+template<typename StateId>
+class State {
+    const detail::StoredState<StateId>* m_state{};
 
-    State(handle_type handle, StateId id) 
-        : m_coro_handle(handle), m_id(id) { }
+    explicit State(const detail::StoredState<StateId>& state) : m_state(&state) { }
 
 public:
-    State(State&& other) noexcept 
-        : m_coro_handle(std::exchange(other.m_coro_handle, nullptr)),
-          m_id(std::exchange(other.m_id, {})),
-          m_is_abominable(std::exchange(other.m_is_abominable, false)) 
-    {
-        m_coro_handle.promise().self = this;
-    }
+    using promise_type = detail::StatePromiseType<StateId>;
 
-    // TODO: Implement properly
-    State& operator=(State&& other) noexcept {
-        m_coro_handle = std::exchange(other.m_coro_handle, nullptr);
-        m_id = std::exchange(other.m_id, {});
-        m_is_abominable = std::exchange(other.m_is_abominable, false);
-        m_coro_handle.promise().self = this;
-        return *this;
-    }
-
-    State(const State&) = delete;
-    State& operator=(const State&) = delete;
-
-    ~State() {
-        if (m_coro_handle)
-            m_coro_handle.destroy();
-    }
-
-    /// @brief Gets the Id of this State.
-    /// @details This id is automatically retrieved from the id parameter when the State coroutine was called.
     StateId Id() const {
-        if (m_coro_handle.address() == nullptr && !m_is_abominable) {
-            throw std::runtime_error("Attempt to get the ID of a state not associated with a coroutine");
-        }
-
-        return m_id;
+        return m_state->first;
     }
 
-    /// @brief Gets whether this state is abominable
-    /// @details Abominable means that this state was killed due to an exception,
-    /// and should be removed and possibly readded by the user.
     bool IsAbominable() const {
-        return m_is_abominable;
+        return m_state->second.IsAbominable();
     }
 
-private:
-    handle_type Handle() const noexcept { return m_coro_handle; }
-    operator handle_type() const noexcept { return m_coro_handle; }
+    template<typename S>
+    friend struct detail::StatePromiseType;
 
     template<typename S, typename E>
     friend class FSM;
-
-    template<typename S>
-    friend class HandleOrId;
-
-    template<typename, typename, typename, typename>
-    friend class detail::RemoteTransitionTarget;
-
-    struct IdHash {
-        using is_transparent = void;
-
-        std::size_t operator()(const State& state) const {
-            using std::hash;
-            return hash<StateId>()(state.m_id);
-        }
-
-        std::size_t operator()(StateId id) const {
-            using std::hash;
-            return hash<StateId>()(id);
-        }
-    };
-
-    struct IdEq {
-        using is_transparent = void;
-
-        bool operator()(const State& lhs, const State& rhs) const {
-            return lhs.m_id == rhs.m_id;
-        }
-
-        bool operator()(StateId lhs, const State& rhs) const {
-            return lhs == rhs.m_id;
-        }
-
-        bool operator()(const State& lhs, StateId rhs) const {
-            return lhs.m_id == rhs;
-        }
-    };
-}; // State
-
-
-// template<typename StateId>
-// class StateRet {
-    
-// };
+};
 
 class ResetToken {
     bool m_should_reset{};
@@ -604,71 +525,18 @@ public:
     }
 };
 
-// namespace detail {
-// template<typename T>
-// concept IsHandle = 
-// }
-
-// template<typename StateId>
-// class HandleOrId {
-// public:
-//     using StateHandle = typename State<StateId>::handle_type;
-
-// private:
-//     std::variant<StateHandle, StateId> m_data{};
-
-// public:
-//     // HandleOrId(StateHandle handle) : m_data(handle) { }
-//     // HandleOrId(StateId id) : m_data(std::move(id)) { }
-//     template<typename T>
-//     requires (not std::is_same_v<std::remove_cvref_t<T>, HandleOrId>)
-//     HandleOrId(T&& o) {
-//         constexpr bool is_handle = std::is_constructible_v<StateHandle, T>;
-//         constexpr bool is_id = std::is_constructible_v<StateId, T>;
-
-//         static_assert(is_handle || is_id);
-
-//         if constexpr (is_handle) {
-//             m_data.template emplace<StateHandle>(std::forward<T>(o));
-//         } else if constexpr (is_id) {
-//             m_data.template emplace<StateId>(std::forward<T>(o));
-//         }
-//     }
-
-//     HandleOrId(const HandleOrId& copy) = default;
-//     HandleOrId(HandleOrId&& move) = default;
-
-//     template<typename EventId>
-//     StateHandle GetHandle(const FSM<StateId, EventId>& fsm) const {
-//         if (std::holds_alternative<StateHandle>(m_data)) {
-//             return std::get<StateHandle>(m_data);
-//         }
-
-//         if (const auto* state = fsm.FindState(std::get<StateId>(m_data))) {
-//             return state->Handle();
-//         }
-
-//         return nullptr;
-//     }
-    
-//     const StateId& GetId() const {
-//         if (std::holds_alternative<StateId>(m_data)) {
-//             return std::get<StateId>(m_data);
-//         } else {
-//             return std::get<StateHandle>(m_data).promise().id;
-//         }
-//     }
-// };
-
 /// @brief The core class for representing a Finite State Machine
 /// @details This class needs to be created first so it can be passed
 /// to the State coroutines when they are started.
 template<typename StateId, typename EventId>
 class FSM {
+    using StateCoro_t = detail::StateCoro<StateId>;
+    using StateHandle = typename StateCoro_t::handle_type;
+    using StoredState_t = detail::StoredState<StateId>;
+
 public:
     using State_t = State<StateId>;
     using Event_t = Event<EventId>;
-    using StateHandle = typename State_t::handle_type;
 
     FSM() = default;
     FSM(std::string human_name) : m_name(std::move(human_name)) { }
@@ -691,8 +559,11 @@ public:
     /// @details If the previous resumption of the state machine resulted in an abominable state
     /// being created (unhandled exception was thrown from it), then the current state is cleared.
     /// In other words, the current state will never be abominable.
-    auto GetCurrentState() const -> const State_t* {
-        return m_cur_state;
+    auto GetCurrentState() const -> std::optional<State_t> {
+        if (m_cur_state != nullptr)
+            return State_t(*m_cur_state);
+        else
+            return std::nullopt;
     }
 
     /// @brief Sets the current state of the FSM.
@@ -700,15 +571,14 @@ public:
     /// no resumption or restart occurs on the former current state.
     /// @todo SetCurrentState can trigger reset
     FSM& SetCurrentState(StateId id) {
-        const auto* state = FindState(id);
+        const StoredState_t* state = FindStoredState(id);
 
         if (state == nullptr)
             throw std::runtime_error(std::format("Attempt to set nonexistent state on FSM '{}'", Name()));
-        else if (state->IsAbominable())
+        else if (state->second.IsAbominable())
             throw std::runtime_error("Attempt to set abominable state as current on FSM");
         else if (m_is_fsm_active)
             throw std::runtime_error("Cannot change the current state while FSM is active");
-
         
         m_cur_state = state;
         return *this;
@@ -723,8 +593,8 @@ public:
     /// then its target \p to will be replaced.
     FSM& AddTransition(StateId from, EventId event, StateId to) {
         auto to_handle = [&]() -> StateHandle {
-            if (const State_t* state = FindState(to)) {
-                return state->Handle();
+            if (const StoredState_t* state = FindStoredState(to)) {
+                return state->second.Handle();
             } else {
                 return nullptr;
             }
@@ -773,8 +643,8 @@ public:
         using Remote_t = FSM<DStateId, DEventId>;
 
         auto to_handle = [&]() -> Remote_t::StateHandle {
-            if (const auto* state = remote_fsm.FindState(to_state)) {
-                return state->Handle();
+            if (const auto* state = remote_fsm.FindStoredState(to_state)) {
+                return state->second.Handle();
             } else {
                 return nullptr;
             }
@@ -899,7 +769,7 @@ public:
 
         bool await_ready() {
             // Save the current state to reset so the transitioner can detect a reset
-            self->m_state_to_reset = self->m_cur_state->Handle();
+            self->m_state_to_reset = self->m_cur_state->second.Handle();
             auto res = self->CommonEmittingAwaitReady(std::move(*event_source));
 
             if (res.should_suspend) {
@@ -1122,28 +992,6 @@ public:
         return IgnoreResettableAwaitable{this};
     }
 
-    /// @brief Adds a state to the FSM.
-    /// @details See State for details on how one should be created.
-    FSM& AddState(State_t&& state) {
-        if (HasState(state.Id())) {
-            throw std::runtime_error("Attempt to add a state with a conflicting id to FSM");
-        }
-
-        if (!state.Handle())
-            throw std::runtime_error(std::format("Attempt to add an empty state to FSM '{}'", Name()));
-
-        m_states.insert(std::move(state));
-        RebindLocalTransitions();
-
-        return *this;
-    }
-
-    // // TODO: Implement properly
-    // State_t& EmplaceState(StateId id, StateHandle handle) {
-    //     AddState(State(id, handle));
-    //     return m_states.back();
-    // }
-
     FSM& RemoveState(StateId id) {
         const auto erase_it = m_states.find(id);
         
@@ -1224,9 +1072,11 @@ public:
         });
     }
 
-    const State_t* FindState(StateId id) const {
-        auto it = m_states.find(id);
-        return it != m_states.end() ? &*it : nullptr;
+    std::optional<State_t> FindState(StateId id) const {
+        if (auto it = m_states.find(id); it != m_states.end())
+            return State_t(*it);
+        else
+            return std::nullopt;
     }
 
     bool HasState(StateId id) const {
@@ -1235,16 +1085,20 @@ public:
 
     /// @brief Returns a range that contains all abominable states.
     auto GetAbominableStates() const {
-        return m_states | std::views::filter([](const State_t& s) {
-            return s.IsAbominable();
-        });
+        return m_states 
+            | std::views::filter([](const StoredState_t& s) {
+                return s.second.IsAbominable();
+            }) 
+            | std::views::transform([](const StoredState_t& s) {
+                return State_t(s);
+            });
     }
 
     /// @brief Removes all states marked as abominable.
     /// @return The number of states removed
     std::size_t RemoveAbominableStates() {
-        return std::erase_if(m_states, [](const State_t& s) {
-            return s.IsAbominable();
+        return std::erase_if(m_states, [](const StoredState_t& s) {
+            return s.second.IsAbominable();
         });
     }
 
@@ -1296,26 +1150,31 @@ public:
     /// @brief Returns true if any State coroutine is currently running.
     bool IsActive() const { return m_is_fsm_active; }
 
-
-    // Callback for debugging and writing log. It is called when the state of
-    // the fsm whose name is in the first argument is about
-    // to change from 'from' to 'to' because the from is sending
-    // event 'event'.
-    std::function<
-        void(const FSM& fsm, 
-             const State_t& from,
-             const Event_t& event,
-             const State_t& to
-        )
-    > logger;
+    // // Callback for debugging and writing log. It is called when the state of
+    // // the fsm whose name is in the first argument is about
+    // // to change from 'from' to 'to' because the from is sending
+    // // event 'event'.
+    // std::function<
+    //     void(const FSM& fsm, 
+    //          const State_t& from,
+    //          const Event_t& event,
+    //          const State_t& to
+    //     )
+    // > logger;
 
 private:
     struct LocalTransitionTarget {
         StateHandle state{};
     };
 
+    template<typename, typename>
+    friend class dxfsm::FSM;
+
     template<typename, typename, typename, typename>
     friend class detail::RemoteTransitionTarget;
+
+    template<typename>
+    friend struct detail::StatePromiseType;
 
     struct LocalTransition {
         std::coroutine_handle<> state_to_resume{};
@@ -1342,7 +1201,7 @@ private:
                 if constexpr (std::is_same_v<T, LocalTransition>) {
                     const LocalTransition& local = o;
                     const bool different_states = originating.m_cur_state == nullptr
-                        || originating.m_cur_state->Handle() != local.state_to_resume;
+                        || originating.m_cur_state->second.Handle() != local.state_to_resume;
 
                     // Trigger a reset if needed
                     if (!originating.IsResetting() && originating.ShouldSendResetOnTransition() && different_states) {
@@ -1363,7 +1222,7 @@ private:
                     const detail::RemoteTransitionTargetBase& remote = *o.remote_target;
                     return remote.TransitionOnRemote(&originating);
                 } else if constexpr(std::is_same_v<T, NullTransition>) {
-                    return originating.m_cur_state->Handle();
+                    return originating.m_cur_state->second.Handle();
                 }
             }, m_data);
         }
@@ -1389,8 +1248,8 @@ private:
                 if constexpr (std::is_same_v<T, LocalTransition>) {
                     LocalTransition& local = o;
                     
-                    if (const State_t* state = originating.FindState(local.id_to_resume)) {
-                        local.state_to_resume = state->Handle();
+                    if (const StoredState_t* state = originating.FindStoredState(local.id_to_resume)) {
+                        local.state_to_resume = state->second.Handle();
                         return true;
                     }
                 } else if constexpr(std::is_same_v<T, RemoteTransition>) {
@@ -1428,7 +1287,7 @@ private:
 
     const Transitioner& GetTransitioner(const Event_t& event) const noexcept {
         // TODO: Implement transparent compare
-        if (auto it = m_transition_table.find({m_cur_state->Id(), event.GetId()}); it != m_transition_table.end())
+        if (auto it = m_transition_table.find({m_cur_state->first, event.GetId()}); it != m_transition_table.end())
             return it->second;
         else
             return null_transition; // No coded state transition, return null transition
@@ -1454,6 +1313,32 @@ private:
             return lhs ^ (rhs + 0x517cc1b727220a95 + (lhs << 6) + (lhs >> 2));
         }
     };
+
+    detail::StoredState<StateId>& EmplaceState(StateId id, StateHandle handle) {
+        if (HasState(id)) {
+            throw std::runtime_error("Attempt to add a state with a conflicting id to FSM");
+        }
+
+        auto [it, ins] = m_states.emplace(
+            std::piecewise_construct,
+            std::forward_as_tuple(std::move(id)), 
+            std::forward_as_tuple(handle)
+        );
+
+        RebindLocalTransitions();
+
+        return *it;
+    }
+
+    StoredState_t* FindStoredState(StateId id) {
+        auto it = m_states.find(id);
+        return it != m_states.end() ? &*it : nullptr;
+    }
+
+    const StoredState_t* FindStoredState(StateId id) const {
+        auto it = m_states.find(id);
+        return it != m_states.end() ? &*it : nullptr;
+    }
 
     bool IsResetting() const {
         return m_transition_after_reset != nullptr;
@@ -1524,7 +1409,7 @@ private:
         }
 
         // Save cur_state here because transitioner.Perform() may update m_cur_state
-        const auto cur_state = m_cur_state->Handle();
+        const auto cur_state = m_cur_state->second.Handle();
 
         Result res{};
         res.next_state = transitioner.Perform(*this);
@@ -1556,13 +1441,13 @@ private:
     }
 
     std::string m_name{};
-    const State_t* m_cur_state{};
+    const StoredState_t* m_cur_state{};
     
     // Transition table in format {from-state, event} -> to-state
     // That is, an event sent from from-state will be routed to to-state.
     std::unordered_map<PartialTransition, Transitioner, PartialTransitionHash> m_transition_table{};
+    detail::StateMap<StateId> m_states{};
 
-    std::unordered_set<State_t, typename State_t::IdHash, typename State_t::IdEq> m_states;
     StateHandle m_state_to_reset{};
     const Transitioner* m_transition_after_reset{};
 
@@ -1611,7 +1496,7 @@ namespace detail {
             target_event = originating_event.TransferToIdType(DEventId(translated_event_id));
 
             const bool different_states = target_fsm->m_cur_state == nullptr
-                || target_fsm->m_cur_state->Handle() != target_state;
+                || target_fsm->m_cur_state->second.Handle() != target_state;
 
             if (!target_fsm->IsResetting() && target_fsm->ShouldSendResetOnTransition() && different_states) {
                 target_fsm->m_transition_after_reset = &local_transitioner;
@@ -1633,8 +1518,8 @@ namespace detail {
         }
 
         bool RebindTransition() override {
-            if (const auto* state = target_fsm->FindState(id_to_resume)) {
-                target_state = state->Handle();
+            if (const auto* state = target_fsm->FindStoredState(id_to_resume)) {
+                target_state = state->second.Handle();
                 local_transitioner = typename DFSM_t::LocalTransition{target_state};
 
                 return true;
