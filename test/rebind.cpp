@@ -35,15 +35,16 @@ namespace {
             // Intentionally add transition before states to test rebinding on AddState
             fsm
                 .Name("FromFSM")
-                .AddTransition(FromStates::FM, FromEvents::FE, FromStates::FT)
-                .AddState(Main(fsm, FromStates::FM))
-                .AddState(Main(fsm, FromStates::FT));
+                .AddTransition(FromStates::FM, FromEvents::FE, FromStates::FT);
+
+            Main(fsm, FromStates::FM);
+            Main(fsm, FromStates::FT);
 
             fsm.SetCurrentState(FromStates::FM);
         }
 
         void ReaddTarget() {
-            fsm.AddState(Main(fsm, FromStates::FT));
+            Main(fsm, FromStates::FT);
             fsm.SetCurrentState(FromStates::FM);
         }
 
@@ -73,15 +74,16 @@ namespace {
             // Intentionally add transition before states to test rebinding on AddState
             fsm
                 .Name("ToFSM")
-                .AddTransition(ToStates::TM, ToEvents::TE, ToStates::TT)
-                .AddState(Main(fsm, ToStates::TM))
-                .AddState(Main(fsm, ToStates::TT));
+                .AddTransition(ToStates::TM, ToEvents::TE, ToStates::TT);
+
+                Main(fsm, ToStates::TM);
+                Main(fsm, ToStates::TT);
 
             fsm.SetCurrentState(ToStates::TM);
         }
 
         void ReaddTarget() {
-            fsm.AddState(Main(fsm, ToStates::TT));
+            Main(fsm, ToStates::TT);
             fsm.SetCurrentState(ToStates::TM);
         }
 
@@ -106,7 +108,7 @@ TEST_CASE("Dangling local transition", "[exceptions][advanced][rebinding]") {
     using Catch::Matchers::Equals;
     CHECK_THROWS_WITH(from.fsm.InsertEvent(FromEvents::FE), Equals("Throw!"));
 
-    REQUIRE(from.fsm.FindState(FromStates::FT) != nullptr);
+    REQUIRE(from.fsm.FindState(FromStates::FT).has_value());
     CHECK(from.fsm.FindState(FromStates::FT)->IsAbominable());
 
     from.fsm.RemoveAbominableStates();
@@ -141,7 +143,7 @@ TEST_CASE("Dangling remote transition", "[exceptions][advanced][remote][rebindin
     case RemoveStrategy::Exception:
         CHECK_THROWS_WITH(from.fsm.InsertEvent(FromEvents::FR), Equals("Throw!"));
 
-        REQUIRE(to.fsm.FindState(ToStates::TT) != nullptr);
+        REQUIRE(to.fsm.FindState(ToStates::TT).has_value());
         CHECK(to.fsm.FindState(ToStates::TT)->IsAbominable());
 
         to.fsm.RemoveAbominableStates();

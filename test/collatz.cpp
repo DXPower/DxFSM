@@ -1,7 +1,6 @@
 #include <dxfsm/dxfsm.hpp>
 
 #include <algorithm>
-#include <iostream>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_templated.hpp>
@@ -52,10 +51,14 @@ struct CollatzFsm {
     std::vector<EventId> event_ids{};
 
     CollatzFsm() {
-        fsm
-            .AddState(StateStart(fsm, StateId::Start).Name("Start"))
-            .AddState(StateProcess(fsm, StateId::Processing).Name("Processing"))
-            .AddState(StateFinish(fsm, StateId::Finish).Name("Finish"));
+        StateStart(fsm, StateId::Start);
+        StateProcess(fsm, StateId::Processing);
+        StateFinish(fsm, StateId::Finish);
+
+        // fsm
+        //     .AddState(StateStart(fsm, StateId::Start))
+        //     .AddState(StateProcess(fsm, StateId::Processing))
+        //     .AddState(StateFinish(fsm, StateId::Finish));
 
         fsm
             .AddTransition(StateId::Start, EventId::ProcessValue, StateId::Processing)
@@ -175,18 +178,16 @@ TEST_CASE("Collatz FSM Exceptions", "[advanced][exceptions]") {
     );
     CHECK_FALSE(collatz.fsm.IsActive());
 
-    std::vector<const CollatzFsm::State_t*> failed_states{};
-    std::ranges::copy(collatz.fsm.GetAbominableStates() | std::views::transform([](const auto& s) {
-        return &s;
-    }), std::back_inserter(failed_states));
+    std::vector<CollatzFsm::State_t> failed_states{};
+    std::ranges::copy(collatz.fsm.GetAbominableStates(), std::back_inserter(failed_states));
 
     REQUIRE(failed_states.size() == 1);
-    CHECK(failed_states[0]->Id() == StateId::Processing);
-    CHECK(failed_states[0]->IsAbominable());
+    CHECK(failed_states[0].Id() == StateId::Processing);
+    CHECK(failed_states[0].IsAbominable());
 
     using Catch::Matchers::ContainsSubstring;
     CHECK_THROWS_WITH(collatz.fsm.SetCurrentState(StateId::Processing), ContainsSubstring("Attempt to set abominable state"));
-    CHECK(collatz.fsm.GetCurrentState() == nullptr);
+    CHECK_FALSE(collatz.fsm.GetCurrentState().has_value());
     
     collatz.fsm.RemoveAbominableStates();
     CHECK(std::ranges::distance(collatz.fsm.GetAbominableStates()) == 0);

@@ -56,11 +56,9 @@ namespace {
         bool throw_after_jump{};
 
         Resets() {
-            // fsm.AddState(State_t &&state)
-            fsm
-                .AddState(Cycler(fsm, "One").Name("OneState"))
-                .AddState(Cycler(fsm, "Two").Name("TwoState"))
-                .AddState(Cycler(fsm, "Three").Name("ThreeState"));
+            Cycler(fsm, "One");
+            Cycler(fsm, "Two");
+            Cycler(fsm, "Three");
 
             fsm
                 .AddTransition("One", EventId::OuterStep, "Two")
@@ -157,16 +155,13 @@ TEST_CASE("Resettable States", "[advanced][resets][exceptions]") {
         Equals("Exception during reset")
     );
 
-    std::vector<const State_t*> failed_states{};
-    std::ranges::copy(resets.fsm.GetAbominableStates() | std::views::transform([](const auto& s) {
-        return &s;
-    }), std::back_inserter(failed_states));
+    std::vector<State_t> failed_states{};
+    std::ranges::copy(resets.fsm.GetAbominableStates(), std::back_inserter(failed_states));
 
-    CHECK(resets.fsm.GetCurrentState() == nullptr);
+    CHECK_FALSE(resets.fsm.GetCurrentState().has_value());
     REQUIRE(failed_states.size() == 1);
-    CHECK(failed_states[0]->IsAbominable());
-    CHECK(failed_states[0]->Id() == "One");
-    CHECK(failed_states[0]->Name() == "OneState");
+    CHECK(failed_states[0].IsAbominable());
+    CHECK(failed_states[0].Id() == "One");
 }
 
 TEST_CASE("Resettable States with Remote Transitions", "[advanced][resets][remote][exceptions]") {
@@ -205,16 +200,13 @@ TEST_CASE("Resettable States with Remote Transitions", "[advanced][resets][remot
     CHECK(ra.fsm.GetCurrentState()->Id() == "One");
     CHECK(rc.fsm.GetCurrentState()->Id() == "One");
 
-    std::vector<const State_t*> failed_states{};
-    std::ranges::copy(rb.fsm.GetAbominableStates() | std::views::transform([](const auto& s) {
-        return &s;
-    }), std::back_inserter(failed_states));
+    std::vector<State_t> failed_states{};
+    std::ranges::copy(rb.fsm.GetAbominableStates(), std::back_inserter(failed_states));
 
-    CHECK(rb.fsm.GetCurrentState() == nullptr);
+    CHECK_FALSE(rb.fsm.GetCurrentState().has_value());
     REQUIRE(failed_states.size() == 1);
-    CHECK(failed_states[0]->IsAbominable());
-    CHECK(failed_states[0]->Id() == "One");
-    CHECK(failed_states[0]->Name() == "OneState");
+    CHECK(failed_states[0].IsAbominable());
+    CHECK(failed_states[0].Id() == "One");
 }
 
 TEST_CASE("Resettable States Resend Event", "[advanced][resets][exceptions]") {
@@ -232,11 +224,11 @@ TEST_CASE("Resettable States Resend Event", "[advanced][resets][exceptions]") {
         Equals("Exception during reset")
     );
 
-    CHECK(resets.fsm.GetCurrentState() == nullptr);
+    CHECK_FALSE(resets.fsm.GetCurrentState().has_value());
 
     resets.fsm.ResendStoredEvent();
 
-    REQUIRE(resets.fsm.GetCurrentState() != nullptr);
+    REQUIRE(resets.fsm.GetCurrentState().has_value());
     CHECK(resets.fsm.GetCurrentState()->Id() == "Two");
 
     CHECK_THAT(resets.stages, Catch::Matchers::Equals(std::vector{
@@ -262,10 +254,10 @@ TEST_CASE("Resettable States Remote Transitions Do Not Reset Local", "[advanced]
     SECTION("Remote reset without exception") {
         CHECK_NOTHROW(ra.fsm.InsertEvent(EventId::Jump, counter++));
 
-        REQUIRE(ra.fsm.GetCurrentState() != nullptr);
+        REQUIRE(ra.fsm.GetCurrentState().has_value());
         CHECK(ra.fsm.GetCurrentState()->Id() == "One");
 
-        REQUIRE(rb.fsm.GetCurrentState() != nullptr);
+        REQUIRE(rb.fsm.GetCurrentState().has_value());
         CHECK(rb.fsm.GetCurrentState()->Id() == "Three");
 
         CHECK_THAT(ra.stages, Catch::Matchers::Equals(std::vector{
@@ -290,25 +282,22 @@ TEST_CASE("Resettable States Remote Transitions Do Not Reset Local", "[advanced]
         );
 
         // RA wasn't affected
-        REQUIRE(ra.fsm.GetCurrentState() != nullptr);
+        REQUIRE(ra.fsm.GetCurrentState().has_value());
         CHECK(ra.fsm.GetCurrentState()->Id() == "One");
 
         // RB threw exception and became abominable
-        CHECK(rb.fsm.GetCurrentState() == nullptr);
+        CHECK_FALSE(rb.fsm.GetCurrentState().has_value());
 
-        std::vector<const State_t*> failed_states{};
-        std::ranges::copy(rb.fsm.GetAbominableStates() | std::views::transform([](const auto& s) {
-            return &s;
-        }), std::back_inserter(failed_states));
+        std::vector<State_t> failed_states{};
+        std::ranges::copy(rb.fsm.GetAbominableStates(), std::back_inserter(failed_states));
 
         REQUIRE(failed_states.size() == 1);
-        CHECK(failed_states[0]->IsAbominable());
-        CHECK(failed_states[0]->Id() == "One");
-        CHECK(failed_states[0]->Name() == "OneState");
+        CHECK(failed_states[0].IsAbominable());
+        CHECK(failed_states[0].Id() == "One");
 
         rb.fsm.ResendStoredEvent();
 
-        REQUIRE(rb.fsm.GetCurrentState() != nullptr);
+        REQUIRE(rb.fsm.GetCurrentState().has_value());
         CHECK(rb.fsm.GetCurrentState()->Id() == "Three");
 
         CHECK_THAT(ra.stages, Catch::Matchers::Equals(std::vector{
@@ -359,9 +348,10 @@ namespace {
         std::vector<Action> actions{};
 
         OtherResets() {
+            StateFunc(fsm, "One");
+            StateFunc(fsm, "Two");
+
             fsm
-                .AddState(StateFunc(fsm, "One"))
-                .AddState(StateFunc(fsm, "Two"))
                 .AddTransition("One", EventId::InnerStep, "One")
                 .AddTransition("Two", EventId::InnerStep, "Two")
                 .AddTransition("One", EventId::Jump, "Two")
@@ -405,18 +395,18 @@ TEST_CASE("Other Resettable Awaitables", "[advanced][resets][rebinding][removing
 
     // Test removing states with resets involved
     resets.fsm.RemoveState("One"); // Current state at this point
-    CHECK(resets.fsm.GetCurrentState() == nullptr);
+    CHECK_FALSE(resets.fsm.GetCurrentState().has_value());
 
-    resets.fsm.AddState(resets.StateFunc(resets.fsm, "One"));
+    resets.StateFunc(resets.fsm, "One");
     resets.fsm.SetCurrentState("One");
 
     // This should move it to Ignored then ReceivedReset
     resets.fsm.InsertEvent(EventId::InnerStep, counter++);
     
     resets.fsm.RemoveState("One"); // Current state at this point
-    CHECK(resets.fsm.GetCurrentState() == nullptr);
+    CHECK_FALSE(resets.fsm.GetCurrentState().has_value());
 
-    resets.fsm.AddState(resets.StateFunc(resets.fsm, "One"));
+    resets.StateFunc(resets.fsm, "One");
     resets.fsm.SetCurrentState("One");
 
     resets.fsm.InsertEvent(EventId::InnerStep, counter++);
@@ -424,10 +414,10 @@ TEST_CASE("Other Resettable Awaitables", "[advanced][resets][rebinding][removing
 
     // Removing non-current state doesn't affect current state
     resets.fsm.RemoveState("Two");
-    REQUIRE(resets.fsm.GetCurrentState() != nullptr);
+    REQUIRE(resets.fsm.GetCurrentState().has_value());
     CHECK(resets.fsm.GetCurrentState()->Id() == "One");
 
-    resets.fsm.AddState(resets.StateFunc(resets.fsm, "Two"));
+    resets.StateFunc(resets.fsm, "Two");
 
     resets.fsm.InsertEvent(EventId::Jump, counter++);
 

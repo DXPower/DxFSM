@@ -29,9 +29,9 @@ namespace {
 
         Light(std::string name, StateId on_state, StateId off_state) {
             fsm.Name(name);
-
-            fsm.AddState(StateOn(fsm, on_state).Name(std::string(on_state)))
-               .AddState(StateOff(fsm, off_state).Name(std::string(off_state)));
+            
+            StateOn(fsm, on_state);
+            StateOff(fsm, off_state);
 
             fsm.AddTransition(on_state, EventId::CycleIn, off_state)
                .AddTransition(off_state, EventId::CycleIn, on_state);
@@ -106,9 +106,9 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
     blue.fsm.AddRemoteTransition("BlueOn"sv, EventId::CycleOut, red.fsm, "RedOn"sv);
 
     SECTION("Normal Operation") {
-        CHECK(red.fsm.GetCurrentState()->Name() == "RedOff");
-        CHECK(green.fsm.GetCurrentState()->Name() == "GreenOff");
-        CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
+        CHECK(red.fsm.GetCurrentState()->Id() == "RedOff");
+        CHECK(green.fsm.GetCurrentState()->Id() == "GreenOff");
+        CHECK(blue.fsm.GetCurrentState()->Id() == "BlueOff");
 
         red.fsm.InsertEvent(EventId::CycleIn); // Turns red on
         red.fsm.InsertEvent([](auto& ev) { ev.Store(EventId::CycleOut, 50); }); // Sends 50 brightness to green
@@ -116,9 +116,9 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK(red.current_brightness == 64);
         CHECK(green.current_brightness == 50);
         CHECK(blue.current_brightness == 36);
-        CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
-        CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
-        CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
+        CHECK(red.fsm.GetCurrentState()->Id() == "RedOn");
+        CHECK(green.fsm.GetCurrentState()->Id() == "GreenOn");
+        CHECK(blue.fsm.GetCurrentState()->Id() == "BlueOff");
 
         green.fsm.InsertEvent(EventId::CycleIn); // Turns green off
         green.fsm.InsertEvent(EventId::CycleIn); // Turns green on
@@ -129,18 +129,18 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK(red.current_brightness == 64);
         CHECK(green.current_brightness == 50);
         CHECK(blue.current_brightness == 75);
-        CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
-        CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
-        CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOn");
+        CHECK(red.fsm.GetCurrentState()->Id() == "RedOn");
+        CHECK(green.fsm.GetCurrentState()->Id() == "GreenOn");
+        CHECK(blue.fsm.GetCurrentState()->Id() == "BlueOn");
 
         blue.fsm.InsertEvent([](auto& ev) { ev.Store(EventId::CycleOut, 49); }); // Sends 49 brightness to red
 
         CHECK(red.current_brightness == 49);
         CHECK(green.current_brightness == 50);
         CHECK(blue.current_brightness == 75);
-        CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
-        CHECK(green.fsm.GetCurrentState()->Name() == "GreenOn");
-        CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOn");
+        CHECK(red.fsm.GetCurrentState()->Id() == "RedOn");
+        CHECK(green.fsm.GetCurrentState()->Id() == "GreenOn");
+        CHECK(blue.fsm.GetCurrentState()->Id() == "BlueOn");
 
         red.fsm.InsertEvent(EventId::CycleIn); // Turns red off
         red.fsm.InsertEvent(EventId::CycleIn); // Turns red on
@@ -155,17 +155,15 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK_THROWS_WITH(red.fsm.InsertEvent([](auto& ev) { ev.Store(EventId::CycleOut, 0xDEAD); }), "DEAD!");
 
         auto CheckFailedStates = [&]<typename S, typename E>(const dxfsm::FSM<S, E>& fsm, std::string_view expected_id = "") {
-            std::vector<const dxfsm::State<S>*> failed_states{};
-            std::ranges::copy(fsm.GetAbominableStates() | std::views::transform([](const auto& s) {
-                return &s;
-            }), std::back_inserter(failed_states));
+            std::vector<typename dxfsm::FSM<S, E>::State_t> failed_states{};
+            std::ranges::copy(fsm.GetAbominableStates(), std::back_inserter(failed_states));
 
             if (expected_id == "") {
                 CHECK(failed_states.size() == 0);
             } else {
                 REQUIRE(failed_states.size() == 1);
-                CHECK(failed_states[0]->Id() == expected_id);
-                CHECK(failed_states[0]->IsAbominable());
+                CHECK(failed_states[0].Id() == expected_id);
+                CHECK(failed_states[0].IsAbominable());
             }
         };
 
@@ -177,10 +175,10 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK_FALSE(green.fsm.IsActive());
         CHECK_FALSE(blue.fsm.IsActive());
 
-        REQUIRE(red.fsm.GetCurrentState() != nullptr);
-        CHECK(red.fsm.GetCurrentState()->Name() == "RedOn");
-        CHECK(green.fsm.GetCurrentState() == nullptr);
-        REQUIRE(blue.fsm.GetCurrentState() != nullptr);
-        CHECK(blue.fsm.GetCurrentState()->Name() == "BlueOff");
+        REQUIRE(red.fsm.GetCurrentState().has_value());
+        CHECK(red.fsm.GetCurrentState()->Id() == "RedOn");
+        CHECK_FALSE(green.fsm.GetCurrentState().has_value());
+        REQUIRE(blue.fsm.GetCurrentState().has_value());
+        CHECK(blue.fsm.GetCurrentState()->Id() == "BlueOff");
     }
 }
