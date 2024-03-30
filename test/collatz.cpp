@@ -55,11 +55,6 @@ struct CollatzFsm {
         StateProcess(fsm, StateId::Processing);
         StateFinish(fsm, StateId::Finish);
 
-        // fsm
-        //     .AddState(StateStart(fsm, StateId::Start))
-        //     .AddState(StateProcess(fsm, StateId::Processing))
-        //     .AddState(StateFinish(fsm, StateId::Finish));
-
         fsm
             .AddTransition(StateId::Start, EventId::ProcessValue, StateId::Processing)
             .AddTransition(StateId::Processing, EventId::ProcessValue, StateId::Processing)
@@ -156,6 +151,45 @@ TEST_CASE("Collatz FSM", "[basic]") {
     std::vector odds_answers = {15,23,35,53,5,1};
 
     CHECK_THAT(odds_vec, Catch::Matchers::Equals(odds_answers));
+}
+
+TEST_CASE("Collatz FSM Transitions", "[basic][transition_api]") {
+    CollatzFsm collatz{};
+    using Transition_t = CollatzFsm::FSM_t::Transition_t;
+
+    std::vector<Transition_t> transitions{};
+    std::ranges::copy(collatz.fsm.GetTransitions(), std::back_inserter(transitions));
+
+    auto HasTransition = [&](StateId from, EventId event) {
+        auto found = collatz.fsm.GetTransition(from, event);
+        bool result = true;
+
+        result &= found.has_value();
+        result &= std::ranges::find_if(transitions, [&](const Transition_t& t) {
+            return t.From() == from && t.Event() == event;
+        }) != transitions.end();
+
+        if (result) {
+            result &= found->From() == from;
+            result &= found->Event() == event;
+        }
+
+        return result;
+    };
+
+    CHECK(HasTransition(StateId::Start, EventId::ProcessValue));
+    CHECK(HasTransition(StateId::Processing, EventId::ProcessValue));
+    CHECK(HasTransition(StateId::Processing, EventId::Finish));
+    CHECK(HasTransition(StateId::Finish, EventId::Start));
+
+    CHECK_FALSE(HasTransition(StateId::Start, EventId::Finish));
+    CHECK_FALSE(HasTransition(StateId::Processing, EventId::Start));
+    CHECK_FALSE(HasTransition(StateId::Finish, EventId::ProcessValue));
+
+    CHECK(collatz.fsm.RemoveTransition(StateId::Start, EventId::ProcessValue));
+    CHECK_FALSE(collatz.fsm.RemoveTransition(StateId::Start, EventId::Finish));
+
+    CHECK_FALSE(HasTransition(StateId::Start, EventId::ProcessValue));
 }
 
 TEST_CASE("Collatz FSM Exceptions", "[advanced][exceptions]") {
