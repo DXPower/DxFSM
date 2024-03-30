@@ -684,23 +684,62 @@ class FSM {
         StateId from;
         EventId event;
 
+        struct Indirect {
+            const StateId* from{};
+            const EventId* event{};
+        };
+
         bool operator==(const PartialTransition& rhs) const = default;
-    };
-
-    struct PartialTransitionHash {
-        std::size_t operator() (const PartialTransition& t) const noexcept {
-            std::size_t lhs = std::hash<StateId>()(t.from);
-
-            // Activate ADL
-            using std::hash;
-            std::size_t rhs = hash<EventId>()(t.event);
-
-            // Combine hashes
-            return lhs ^ (rhs + 0x517cc1b727220a95 + (lhs << 6) + (lhs >> 2));
+        bool operator==(const Indirect& rhs) const {
+            return from == *rhs.from && event == *rhs.event;
         }
+
+        struct Equal {
+            using is_transparent = void;
+
+            bool operator()(const PartialTransition& lhs, const PartialTransition& rhs) const {
+                return lhs == rhs;
+            }
+
+            bool operator()(const PartialTransition& lhs, const Indirect& rhs) const {
+                return lhs == rhs;
+            }
+
+            bool operator()(const Indirect& lhs, const PartialTransition& rhs) const {
+                return rhs == lhs;
+            }
+        };
+
+        struct Hash {
+            using is_transparent = void;
+
+            std::size_t do_hash(const StateId& from, const EventId& event) const noexcept {
+                // Activate ADL
+                using std::hash;
+                std::size_t from_hash = hash<StateId>()(from);
+                std::size_t event_hash = hash<EventId>()(event);
+
+                // Combine hashes
+                return from_hash ^ (event_hash + 0x517cc1b727220a95 + (from_hash << 6) + (from_hash >> 2));
+            }
+
+            std::size_t operator()(const PartialTransition& t) const noexcept {
+                return do_hash(t.from, t.event);
+            }
+
+            std::size_t operator()(const Indirect& t) const noexcept {
+                return do_hash(*t.from, *t.event);
+            }
+        };
     };
 
-    using TransitionTable_t = std::unordered_map<PartialTransition, Transitioner, PartialTransitionHash>;
+    using TransitionTable_t = std::unordered_map<
+        PartialTransition,
+        Transitioner,
+        typename PartialTransition::Hash,
+        typename PartialTransition::Equal
+    >;
+
 public:
     using State_t = State<StateId>;
     using Event_t = Event<EventId>;
@@ -758,7 +797,6 @@ public:
     /// @brief Sets the current state of the FSM.
     /// @details The previous state will remain in its prior stage in execution; ie.,
     /// no resumption or restart occurs on the former current state.
-    /// @todo SetCurrentState can trigger reset
     FSM& SetCurrentState(StateId id) {
         const StoredState_t* state = FindStoredState(id);
 
@@ -858,8 +896,9 @@ public:
         });
     }
 
-    std::optional<Transition_t> GetTransition(StateId from, EventId event) const {
-        auto it = m_transition_table.find({from, event});
+    std::optional<Transition_t> GetTransition(const StateId& from, const EventId& event) const {
+        typename PartialTransition::Indirect key{&from, &event};
+        auto it = m_transition_table.find(key);
 
         if (it != m_transition_table.end()) {
             return Transition_t(*this, *it);
@@ -869,8 +908,8 @@ public:
     }
 
     bool RemoveTransition(StateId from, EventId event) {
-        // TODO: Implement transparent find
-        auto it = m_transition_table.find({from, event});
+        typename PartialTransition::Indirect key{&from, &event};
+        auto it = m_transition_table.find(key);
 
         if (it != m_transition_table.end()) {
             m_transition_table.erase(it);
@@ -881,7 +920,7 @@ public:
     }
    
     bool RemoveTransition(const Transition_t& transition) {
-        // TODO: Implement transparent find
+        typename PartialTransition::Indirect key{&transition.From(), &transition.Event()};
         auto it = m_transition_table.find({transition.From(), transition.Event()});
 
         if (it != m_transition_table.end()) {
@@ -1361,8 +1400,8 @@ private:
     friend class Transition;
 
     const Transitioner& GetTransitioner(const Event_t& event) const noexcept {
-        // TODO: Implement transparent compare
-        if (auto it = m_transition_table.find({m_cur_state->first, event.GetId()}); it != m_transition_table.end())
+        typename PartialTransition::Indirect key{&m_cur_state->first, &event.GetId()};
+        if (auto it = m_transition_table.find(key); it != m_transition_table.end())
             return it->second;
         else
             return null_transition; // No coded state transition, return null transition
