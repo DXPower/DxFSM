@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 namespace {
     using StateId = std::string_view;
@@ -23,12 +24,28 @@ namespace {
             }
         }
     }
+
+    State_t Resettable(FSM_t& fsm, StateId, bool emit_mode) {
+        FSM_t::Event_t event = co_await fsm.ReceiveInitialEvent();
+        (void) co_await fsm.IgnoreEventResettable();
+
+        event.Store("Blah", 123);
+
+        while (true) {
+            if (emit_mode) {
+                co_await fsm.EmitAndReceive(event);
+            } else {
+                (void) co_await fsm.EmitAndReceiveResettable(event);
+            }
+        }
+    }
 }
 
 TEST_CASE("Basic usage error checking", "[basic][exceptions][removing]") {
     using namespace Catch::Matchers;
 
     FSM_t fsm{};
+
     bool throw_on_resume = false;
     bool delete_on_resume = false;
     std::string_view state_to_set = "";
@@ -62,5 +79,20 @@ TEST_CASE("Basic usage error checking", "[basic][exceptions][removing]") {
     SECTION("Remove current state while running") {
         delete_on_resume = true;
         CHECK_THROWS_WITH(fsm.InsertEvent("Event"), ContainsSubstring("while it is running"));
+    }
+
+    SECTION("Emit non-empty event while resetting") {
+        auto resettable_state = Resettable(fsm, "Resettable", GENERATE(true, false));
+        fsm.AddTransition("Resettable", "Transition", "State");
+        fsm.SetCurrentState(resettable_state);
+        fsm.InsertEvent("event"); // Start the state with the initial event, setting up the reset
+
+        SECTION("Reset from event transition") {
+            CHECK_THROWS_WITH(fsm.InsertEvent("Transition"), ContainsSubstring("non-empty event"));
+        }
+
+        SECTION("Reset from SetCurrentState") {
+            CHECK_THROWS_WITH(fsm.SetCurrentState("State"), ContainsSubstring("non-empty event"));
+        }
     }
 }

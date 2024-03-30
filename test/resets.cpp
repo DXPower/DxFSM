@@ -135,6 +135,10 @@ TEST_CASE("Resettable States", "[advanced][resets][exceptions]") {
     resets.fsm.InsertEvent(EventId::OuterStep, counter++);
     resets.fsm.InsertEvent(EventId::InnerNext);
 
+    resets.fsm.SetCurrentState("Three"); // Should trigger reset
+    resets.fsm.SetCurrentState("One"); // Won't trigger reset
+    resets.fsm.InsertEvent(EventId::InnerStep, counter++);
+
     CHECK_THAT(resets.stages, Catch::Matchers::Equals(std::vector{
         Stage{"One", A, 1},
         Stage{"One", B, 2},
@@ -145,7 +149,9 @@ TEST_CASE("Resettable States", "[advanced][resets][exceptions]") {
         Stage{"Two", A, -1},
         Stage{"Three", A, 6},
         Stage{"Three", A, -1},
-        Stage{"One", B, 0xFACE}
+        Stage{"One", B, 0xFACE},
+        Stage{"One", A, -1},
+        Stage{"One", B, 7},
     }));
 
     resets.throw_on_reset = true;

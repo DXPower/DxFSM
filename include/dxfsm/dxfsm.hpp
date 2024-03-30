@@ -734,6 +734,27 @@ public:
             return std::nullopt;
     }
 
+    FSM& SetCurrentState(State_t state) {
+        if (state.IsAbominable())
+            throw std::runtime_error("Attempt to set abominable state as current on FSM");
+        else if (m_is_fsm_active)
+            throw std::runtime_error("Cannot change the current state while FSM is active");
+        
+        const auto* stored_state = state.m_state;
+
+        // If the current state changes while waiting on a resettable awaiter,
+        // trigger the reset
+        if (m_cur_state != stored_state && m_state_to_reset != nullptr) {
+            m_do_one_shot_reset = true;
+            m_state_to_reset.resume();
+            m_do_one_shot_reset = false;
+            m_state_to_reset = nullptr; // Clear if this was set
+        }
+
+        m_cur_state = stored_state;
+        return *this;
+    }
+
     /// @brief Sets the current state of the FSM.
     /// @details The previous state will remain in its prior stage in execution; ie.,
     /// no resumption or restart occurs on the former current state.
@@ -743,13 +764,8 @@ public:
 
         if (state == nullptr)
             throw std::runtime_error(std::format("Attempt to set nonexistent state on FSM '{}'", Name()));
-        else if (state->second.IsAbominable())
-            throw std::runtime_error("Attempt to set abominable state as current on FSM");
-        else if (m_is_fsm_active)
-            throw std::runtime_error("Cannot change the current state while FSM is active");
         
-        m_cur_state = state;
-        return *this;
+        return SetCurrentState(State_t(*state));
     }
 
     /// @brief Adds a transition that defines `from->to` whenever \p event is sent to this FSM.
@@ -912,7 +928,7 @@ public:
     /// If no transition was found, then the target state will be the current state.
     /// @param event The event to be sent and eventually received. It will be transparently replaced with the received event.
     [[nodiscard]] EmitReceiveAwaitable EmitAndReceive(Event_t& event) {
-        if (IsResetting() && !event.Empty()) {
+        if ((IsResetting() || m_do_one_shot_reset) && !event.Empty()) {
             throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
         }
 
@@ -932,8 +948,11 @@ public:
         std::coroutine_handle<> next_state{};
 
         bool await_ready() {
-            // Save the current state to reset so the transitioner can detect a reset
-            self->m_state_to_reset = self->m_cur_state->second.Handle();
+            if (not self->IsResetting() && not self->m_do_one_shot_reset) {
+                // Save the current state to reset so the transitioner can detect a reset
+                self->m_state_to_reset = self->m_cur_state->second.Handle();
+            }
+
             auto res = self->CommonEmittingAwaitReady(std::move(*event_source));
 
             if (res.should_suspend) {
@@ -978,7 +997,7 @@ public:
     /// This can be used to clean up the variables of a @ref State coroutine.
     /// @param event The event to be sent and eventually received. It will be transparently replaced with the received event.
     [[nodiscard]] EmitReceiveResettableAwaitable EmitAndReceiveResettable(Event_t& event) {
-        if (IsResetting() && !event.Empty()) {
+        if ((IsResetting() || m_do_one_shot_reset) && !event.Empty()) {
             throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
         }
 
@@ -1168,7 +1187,6 @@ public:
     /// by this function call, that State will be marked "abominable", then the exception will
     /// be rethrown from that call. The abominable state should be removed and readded before
     /// it is resumed, otherwise it results in undefined behavior.
-    /// @todo Should this detect no current state/abominable states?
     template<std::invocable<Event_t&> F>
     FSM& InsertEvent(F&& event_initializer) {
         std::forward<F>(event_initializer)(m_event_for_next_resume);
@@ -1382,6 +1400,7 @@ private:
         return it != m_states.end() ? &*it : nullptr;
     }
 
+    // This does not consider one-shot reset
     bool IsResetting() const {
         return m_transition_after_reset != nullptr;
     }
@@ -1407,7 +1426,7 @@ private:
     std::coroutine_handle<> CommonAwaitSuspend() {
         m_is_fsm_active = false;
 
-        if (!IsResetting()) {
+        if (not IsResetting() || m_do_one_shot_reset) {
             return std::noop_coroutine();
         }
 
@@ -1422,7 +1441,7 @@ private:
     // If currently resetting, this will always return false.
     // Otherwise, this will return true if there is an event ready
     bool CommonAwaitReady() {
-        return !IsResetting() && not m_event_for_next_resume.Empty();
+        return not IsResetting() && not m_do_one_shot_reset && not m_event_for_next_resume.Empty();
     }
 
     // If currently resetting, this will resume the stored post-reset transition.
@@ -1435,7 +1454,12 @@ private:
 
         // If this state sends an empty event and we're not resetting,
         // then suspend the FSM
-        if (pending_event.Empty() && !IsResetting()) {
+        if (pending_event.Empty() && not IsResetting()) {
+            return Result{std::noop_coroutine(), true};
+        }
+
+        // If this is a one-shot reset, suspend the FSM
+        if (m_do_one_shot_reset) {
             return Result{std::noop_coroutine(), true};
         }
 
@@ -1465,7 +1489,7 @@ private:
         if (ShouldResumeRespondWithReset()) {
             return true;
         } else if (m_do_one_shot_reset) {
-            return std::exchange(m_do_one_shot_reset, false);
+            return true;
         } else {
             m_state_to_reset = nullptr;
             return false;
