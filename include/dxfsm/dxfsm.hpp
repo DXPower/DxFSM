@@ -551,7 +551,7 @@ public:
     }
 
     bool IsDangling() const {
-        return m_transition->second.IsDangling();
+        return m_transition->second.IsDangling(*m_fsm);
     }
 
     template<typename, typename>
@@ -642,6 +642,8 @@ class FSM {
                     if (const StoredState_t* state = originating.FindStoredState(local.id_to_resume)) {
                         local.state_to_resume = state->second.Handle();
                         return true;
+                    } else {
+                        local.state_to_resume = nullptr;
                     }
                 } else if constexpr(std::is_same_v<T, RemoteTransition>) {
                     detail::RemoteTransitionTargetBase& remote = *o.remote_target;
@@ -660,11 +662,13 @@ class FSM {
             return std::holds_alternative<NullTransition>(m_data);
         }
 
-        bool IsDangling(FSM& originating) const {
+        bool IsDangling(const FSM& originating) const {
             return std::visit([&originating]<typename T>(const T& o) {
                 if constexpr (std::is_same_v<T, LocalTransition>) {
                     const LocalTransition& local = o;
-                    return !originating.HasState(local.id_to_resume);
+                    const auto state = originating.GetState(local.id_to_resume);
+
+                    return !state.has_value() || state->IsAbominable();
                 } else if constexpr(std::is_same_v<T, RemoteTransition>) {
                     const detail::RemoteTransitionTargetBase& remote = *o.remote_target;
                     return remote.IsTransitionDangling();
@@ -1152,27 +1156,6 @@ public:
         return IgnoreResettableAwaitable{this};
     }
 
-    FSM& RemoveState(StateId id) {
-        const auto erase_it = m_states.find(id);
-        
-        if (erase_it == m_states.end()) {
-            throw std::runtime_error("Attempt to remove nonexistent state");
-        } else if (&*erase_it == m_cur_state && m_is_fsm_active) {
-            throw std::runtime_error("Cannot delete state while it is running");
-        }
-
-        if (&*erase_it == m_cur_state) {
-            m_state_to_reset = nullptr;
-            m_cur_state = nullptr;
-        }
-
-        m_states.erase(erase_it);
-        RebindLocalTransitions();
-        return *this;
-    }
-
-    std::size_t NumStates() const { return m_states.size(); }
-
     /// @brief Sends an event to a suspended FSM, potentially triggering a transition.
     /// @details If (cur state, event id) exists in the transition table, then a transition
     /// will be triggered to the target state and the event will be sent to that state and resume.
@@ -1232,26 +1215,46 @@ public:
         });
     }
 
-    std::optional<State_t> FindState(StateId id) const {
+    std::optional<State_t> GetState(StateId id) const {
         if (auto it = m_states.find(id); it != m_states.end())
             return State_t(*it);
         else
             return std::nullopt;
     }
 
+    auto GetStates() const {
+        return m_states | std::views::transform([](const StoredState_t& s) {
+            return State_t(s);
+        });
+    }
+
     bool HasState(StateId id) const {
         return m_states.find(id) != m_states.end();
     }
 
-    /// @brief Returns a range that contains all abominable states.
-    auto GetAbominableStates() const {
-        return m_states 
-            | std::views::filter([](const StoredState_t& s) {
-                return s.second.IsAbominable();
-            }) 
-            | std::views::transform([](const StoredState_t& s) {
-                return State_t(s);
-            });
+    std::size_t NumStates() const { return m_states.size(); }
+
+    bool RemoveState(StateId id) {
+        const auto erase_it = m_states.find(id);
+        
+        if (erase_it == m_states.end()) {
+            return false;
+        } else if (&*erase_it == m_cur_state && m_is_fsm_active) {
+            throw std::runtime_error("Cannot delete state while it is running");
+        }
+
+        if (&*erase_it == m_cur_state) {
+            m_state_to_reset = nullptr;
+            m_cur_state = nullptr;
+        }
+
+        m_states.erase(erase_it);
+        RebindLocalTransitions();
+        return true;
+    }
+
+    bool RemoveState(State_t state) {
+        return RemoveState(state.Id());
     }
 
     /// @brief Removes all states marked as abominable.
@@ -1348,19 +1351,25 @@ private:
     }
     
     detail::StoredState<StateId>& EmplaceState(StateId id, StateHandle handle) {
-        if (HasState(id)) {
+        auto state_it = m_states.find(id);
+
+        if (state_it != m_states.end() && !state_it->second.IsAbominable()) {
             throw std::runtime_error("Attempt to add a state with a conflicting id to FSM");
         }
 
-        auto [it, ins] = m_states.emplace(
-            std::piecewise_construct,
-            std::forward_as_tuple(std::move(id)), 
-            std::forward_as_tuple(handle)
-        );
+        if (state_it == m_states.end()) {
+            state_it = m_states.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(std::move(id)), 
+                std::forward_as_tuple(handle)
+            ).first;
+        } else {
+            state_it->second.m_coro_handle = handle;
+        }
 
         RebindLocalTransitions();
 
-        return *it;
+        return *state_it;
     }
 
     StoredState_t* FindStoredState(StateId id) {
@@ -1559,13 +1568,17 @@ namespace detail {
                 local_transitioner = typename DFSM_t::LocalTransition{target_state};
 
                 return true;
+            } else {
+                target_fsm = nullptr;
+                local_transitioner = {};
             }
 
             return false;
         }
 
         bool IsTransitionDangling() const override {
-            return !target_fsm->HasState(id_to_resume);
+            const auto state = target_fsm->GetState(id_to_resume);
+            return !state.has_value() || state->IsAbominable();
         }
     };
 }

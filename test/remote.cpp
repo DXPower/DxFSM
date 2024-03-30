@@ -1,4 +1,5 @@
 #include <dxfsm/dxfsm.hpp>
+#include "common.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_vector.hpp>
@@ -155,8 +156,7 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         CHECK_THROWS_WITH(red.fsm.InsertEvent([](auto& ev) { ev.Store(EventId::CycleOut, 0xDEAD); }), "DEAD!");
 
         auto CheckFailedStates = [&]<typename S, typename E>(const dxfsm::FSM<S, E>& fsm, std::string_view expected_id = "") {
-            std::vector<typename dxfsm::FSM<S, E>::State_t> failed_states{};
-            std::ranges::copy(fsm.GetAbominableStates(), std::back_inserter(failed_states));
+            auto failed_states = GetAbominableStates(fsm);
 
             if (expected_id == "") {
                 CHECK(failed_states.size() == 0);

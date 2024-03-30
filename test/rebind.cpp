@@ -99,20 +99,32 @@ namespace {
             }
         }
     };
-}
+}   
 
-TEST_CASE("Dangling local transition", "[exceptions][advanced][rebinding]") {
+TEST_CASE("Dangling local transition", "[exceptions][advanced][rebinding][state_api][transition_api]") {
     From from{};
     from.throw_on_resume = true;
 
     using Catch::Matchers::Equals;
     CHECK_THROWS_WITH(from.fsm.InsertEvent(FromEvents::FE), Equals("Throw!"));
 
-    REQUIRE(from.fsm.FindState(FromStates::FT).has_value());
-    CHECK(from.fsm.FindState(FromStates::FT)->IsAbominable());
+    REQUIRE(from.fsm.GetState(FromStates::FT).has_value());
+    CHECK(from.fsm.GetState(FromStates::FT)->IsAbominable());
 
-    from.fsm.RemoveAbominableStates();
-    
+    bool remove_abominable_states = GENERATE(false, true);
+    if (remove_abominable_states) {
+        from.fsm.RemoveAbominableStates();
+    }
+
+    auto abominable_state = from.fsm.GetState(FromStates::FT);
+
+    if (remove_abominable_states) {
+        CHECK_FALSE(abominable_state.has_value());
+    } else {
+        REQUIRE(abominable_state.has_value());
+        CHECK(abominable_state->IsAbominable());
+    }
+
     SECTION("Readd state") {
         from.throw_on_resume = false;
         from.ReaddTarget();
@@ -120,6 +132,14 @@ TEST_CASE("Dangling local transition", "[exceptions][advanced][rebinding]") {
         CHECK_NOTHROW(from.fsm.InsertEvent(FromEvents::FE));
 
         CHECK_THAT(from.states, Equals(std::vector{FromStates::FT}));
+
+        if (remove_abominable_states) {
+            abominable_state = from.fsm.GetState(FromStates::FT);
+        }
+
+        REQUIRE(abominable_state.has_value());
+        CHECK_FALSE(abominable_state->IsAbominable());
+        CHECK(abominable_state->Id() == FromStates::FT);
     }
 
     SECTION("Delete dangling transition") {
@@ -127,7 +147,7 @@ TEST_CASE("Dangling local transition", "[exceptions][advanced][rebinding]") {
     }
 }
 
-TEST_CASE("Dangling remote transition", "[exceptions][advanced][remote][rebinding][removing]") {
+TEST_CASE("Dangling remote transition", "[exceptions][advanced][remote][rebinding][removing][state_api][transition_api]") {
     using Catch::Matchers::Equals;
 
     From from{};
@@ -136,27 +156,53 @@ TEST_CASE("Dangling remote transition", "[exceptions][advanced][remote][rebindin
 
     from.fsm.AddRemoteTransition(FromStates::FM, FromEvents::FR, to.fsm, ToStates::TT, ToEvents::TR);
 
-    enum class RemoveStrategy { Exception, Remove };
-    auto strat = GENERATE(RemoveStrategy::Exception, RemoveStrategy::Remove);
+    enum class RemoveStrategy { Exception, Remove, ExceptionRemove };
+    auto strat = GENERATE(RemoveStrategy::Exception, RemoveStrategy::ExceptionRemove, RemoveStrategy::Remove);
+    bool remote_state_removed = false;
 
     switch (strat) {
     case RemoveStrategy::Exception:
+    case RemoveStrategy::ExceptionRemove:
         CHECK_THROWS_WITH(from.fsm.InsertEvent(FromEvents::FR), Equals("Throw!"));
 
-        REQUIRE(to.fsm.FindState(ToStates::TT).has_value());
-        CHECK(to.fsm.FindState(ToStates::TT)->IsAbominable());
+        REQUIRE(to.fsm.GetState(ToStates::TT).has_value());
+        CHECK(to.fsm.GetState(ToStates::TT)->IsAbominable());
 
-        to.fsm.RemoveAbominableStates();
+        if (strat == RemoveStrategy::ExceptionRemove) {
+            to.fsm.RemoveAbominableStates();
+            remote_state_removed = true;
+        }
         break;
     case RemoveStrategy::Remove:
         to.fsm.RemoveState(ToStates::TT);
+        remote_state_removed = true;
         break;
     }
+
+    CHECK(from.fsm.GetTransition(FromStates::FM, FromEvents::FR)->IsDangling());
     
+    auto removed_state = to.fsm.GetState(ToStates::TT);
+
+    if (remote_state_removed) {
+        CHECK_FALSE(removed_state.has_value());
+    } else {
+        REQUIRE(removed_state.has_value());
+        CHECK(removed_state->IsAbominable());
+    }
+
     SECTION("Readd state and remote rebind") {
         to.throw_on_resume = false;
         to.ReaddTarget();
         from.fsm.RebindRemoteTransitions();
+
+        if (remote_state_removed) {
+            removed_state = to.fsm.GetState(ToStates::TT);
+        }
+
+        REQUIRE(removed_state.has_value());
+        CHECK_FALSE(removed_state->IsAbominable());
+        CHECK(removed_state->Id() == ToStates::TT);
+        CHECK_FALSE(from.fsm.GetTransition(FromStates::FM, FromEvents::FR)->IsDangling());
 
         CHECK_NOTHROW(from.fsm.InsertEvent(FromEvents::FR));
 

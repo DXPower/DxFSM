@@ -1,4 +1,5 @@
 #include <dxfsm/dxfsm.hpp>
+#include "common.hpp"
 
 #include <ostream>
 
@@ -155,8 +156,7 @@ TEST_CASE("Resettable States", "[advanced][resets][exceptions]") {
         Equals("Exception during reset")
     );
 
-    std::vector<State_t> failed_states{};
-    std::ranges::copy(resets.fsm.GetAbominableStates(), std::back_inserter(failed_states));
+    std::vector<State_t> failed_states = GetAbominableStates(resets.fsm);
 
     CHECK_FALSE(resets.fsm.GetCurrentState().has_value());
     REQUIRE(failed_states.size() == 1);
@@ -195,13 +195,13 @@ TEST_CASE("Resettable States with Remote Transitions", "[advanced][resets][remot
         Catch::Matchers::Equals("Jump throw")
     );
 
-    CHECK(ra.fsm.GetAbominableStates().empty());
-    CHECK(rc.fsm.GetAbominableStates().empty());
+    CHECK(GetAbominableStates(ra.fsm).empty());
+    CHECK(GetAbominableStates(rc.fsm).empty());
     CHECK(ra.fsm.GetCurrentState()->Id() == "One");
     CHECK(rc.fsm.GetCurrentState()->Id() == "One");
 
     std::vector<State_t> failed_states{};
-    std::ranges::copy(rb.fsm.GetAbominableStates(), std::back_inserter(failed_states));
+    std::ranges::copy(GetAbominableStates(rb.fsm), std::back_inserter(failed_states));
 
     CHECK_FALSE(rb.fsm.GetCurrentState().has_value());
     REQUIRE(failed_states.size() == 1);
@@ -289,7 +289,7 @@ TEST_CASE("Resettable States Remote Transitions Do Not Reset Local", "[advanced]
         CHECK_FALSE(rb.fsm.GetCurrentState().has_value());
 
         std::vector<State_t> failed_states{};
-        std::ranges::copy(rb.fsm.GetAbominableStates(), std::back_inserter(failed_states));
+        std::ranges::copy(GetAbominableStates(rb.fsm), std::back_inserter(failed_states));
 
         REQUIRE(failed_states.size() == 1);
         CHECK(failed_states[0].IsAbominable());

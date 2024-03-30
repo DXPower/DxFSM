@@ -1,4 +1,5 @@
 #include <dxfsm/dxfsm.hpp>
+#include "common.hpp"
 
 #include <algorithm>
 
@@ -153,7 +154,7 @@ TEST_CASE("Collatz FSM", "[basic]") {
     CHECK_THAT(odds_vec, Catch::Matchers::Equals(odds_answers));
 }
 
-TEST_CASE("Collatz FSM Transitions", "[basic][transition_api]") {
+TEST_CASE("Collatz FSM States/Transitions", "[basic][transition_api][state_api]") {
     CollatzFsm collatz{};
     using Transition_t = CollatzFsm::FSM_t::Transition_t;
 
@@ -190,6 +191,15 @@ TEST_CASE("Collatz FSM Transitions", "[basic][transition_api]") {
     CHECK_FALSE(collatz.fsm.RemoveTransition(StateId::Start, EventId::Finish));
 
     CHECK_FALSE(HasTransition(StateId::Start, EventId::ProcessValue));
+
+    CHECK(collatz.fsm.HasState(StateId::Start));
+    CHECK(collatz.fsm.GetState(StateId::Start).has_value());
+    CHECK(collatz.fsm.RemoveState(StateId::Start));
+    CHECK_FALSE(collatz.fsm.HasState(StateId::Start));
+    CHECK_FALSE(collatz.fsm.GetState(StateId::Start).has_value());
+    CHECK_FALSE(collatz.fsm.RemoveState(StateId::Start));
+
+    CHECK(collatz.fsm.GetTransition(StateId::Finish, EventId::Start)->IsDangling());
 }
 
 TEST_CASE("Collatz FSM Exceptions", "[advanced][exceptions]") {
@@ -212,17 +222,18 @@ TEST_CASE("Collatz FSM Exceptions", "[advanced][exceptions]") {
     );
     CHECK_FALSE(collatz.fsm.IsActive());
 
-    std::vector<CollatzFsm::State_t> failed_states{};
-    std::ranges::copy(collatz.fsm.GetAbominableStates(), std::back_inserter(failed_states));
+    std::vector<CollatzFsm::State_t> failed_states = GetAbominableStates(collatz.fsm);
 
     REQUIRE(failed_states.size() == 1);
     CHECK(failed_states[0].Id() == StateId::Processing);
     CHECK(failed_states[0].IsAbominable());
+    CHECK(collatz.fsm.GetTransition(StateId::Start, EventId::ProcessValue)->IsDangling());
+    CHECK(collatz.fsm.GetTransition(StateId::Processing, EventId::ProcessValue)->IsDangling());
 
     using Catch::Matchers::ContainsSubstring;
     CHECK_THROWS_WITH(collatz.fsm.SetCurrentState(StateId::Processing), ContainsSubstring("Attempt to set abominable state"));
     CHECK_FALSE(collatz.fsm.GetCurrentState().has_value());
     
     collatz.fsm.RemoveAbominableStates();
-    CHECK(std::ranges::distance(collatz.fsm.GetAbominableStates()) == 0);
+    CHECK(GetAbominableStates(collatz.fsm).size() == 0);
 }

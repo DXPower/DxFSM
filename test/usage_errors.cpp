@@ -59,10 +59,6 @@ TEST_CASE("Basic usage error checking", "[basic][exceptions][removing]") {
         CHECK_THROWS_WITH(fsm.InsertEvent("Event"), ContainsSubstring("FSM is active"));
     }
 
-    SECTION("Remove nonexistent state") {
-        CHECK_THROWS_WITH(fsm.RemoveState("Not here"), ContainsSubstring("nonexistent"));
-    }
-
     SECTION("Remove current state while running") {
         delete_on_resume = true;
         CHECK_THROWS_WITH(fsm.InsertEvent("Event"), ContainsSubstring("while it is running"));
