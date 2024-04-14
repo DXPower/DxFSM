@@ -1,0 +1,2 @@
+add_executable(traffic_light traffic_light.cpp)
+target_link_libraries(traffic_light PRIVATE dxfsm)

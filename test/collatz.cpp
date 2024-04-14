@@ -33,14 +33,6 @@ namespace {
     };
 }
 
-template<>
-struct std::hash<EventId> {
-    std::size_t operator()(const EventId& id) {
-        using U = std::underlying_type_t<EventId>;
-        return std::hash<U>{}(static_cast<U>(id));
-    }
-};
-
 struct CollatzFsm {
     using Event_t = Event<EventId>;
     using State_t = State<StateId>;
