@@ -525,17 +525,20 @@ public:
     }
 };
 
-template<typename StateId, typename EventId>
+template<typename StateId, typename EventId, bool IsConst = false>
 class Transition {
     using FSM_t = FSM<StateId, EventId>;
     using StoredTransition_t = FSM<StateId, EventId>::TransitionTable_t::value_type;
+    using CST = std::conditional_t<IsConst, const StoredTransition_t, StoredTransition_t>;
 
     const FSM_t* m_fsm{};
-    const StoredTransition_t* m_transition{};
+    CST* m_transition{};
 
-    Transition(const FSM_t& fsm, const StoredTransition_t& transition)
+    Transition(const FSM_t& fsm, CST& transition)
         : m_fsm(&fsm), m_transition(&transition) { }
 public:
+    using Guard_t = std::function<typename FSM_t::GuardSig>;
+
     const StateId& From() const {
         return m_transition->first.from;
     }
@@ -554,15 +557,37 @@ public:
         return m_transition->second.IsDangling(*m_fsm);
     }
 
+    Guard_t& Guard() {
+        return m_transition->second.Guard();
+    }
+
+    const Guard_t& Guard() const {
+        return m_transition->second.Guard();
+    }
+
+    void Guard(Guard_t&& guard) requires (not IsConst) {
+        m_transition->second.Guard(std::move(guard));
+    }
+
     template<typename, typename>
     friend class FSM;
 };
+
+template<typename StateId, typename EventId>
+using CTransition = Transition<StateId, EventId, true>;
 
 /// @brief The core class for representing a Finite State Machine
 /// @details This class needs to be created first so it can be passed
 /// to the State coroutines when they are started.
 template<typename StateId, typename EventId>
 class FSM {
+public:
+    using State_t = State<StateId>;
+    using Event_t = Event<EventId>;
+
+    using GuardSig = bool(const Event_t&);
+
+private:
     using StateCoro_t = detail::StateCoro<StateId>;
     using StateHandle = typename StateCoro_t::handle_type;
     using StoredState_t = detail::StoredState<StateId>;
@@ -579,13 +604,20 @@ class FSM {
     struct NullTransition { };
 
     class Transitioner {
+    public:
         std::variant<LocalTransition, RemoteTransition, NullTransition> m_data{};
+        std::function<GuardSig> m_guard{};
 
     public:
         Transitioner() : Transitioner(NullTransition{}) { }
         Transitioner(NullTransition) : m_data(std::in_place_type<NullTransition>) { }
         Transitioner(LocalTransition local) : m_data(local) { }
         Transitioner(RemoteTransition&& remote) : m_data(std::move(remote)) { }
+
+        void Guard(std::function<GuardSig> func) { m_guard = std::move(func); }
+
+        std::function<GuardSig>& Guard() { return m_guard; }
+        const std::function<GuardSig>& Guard() const { return m_guard; }
 
         std::coroutine_handle<> Perform(FSM& originating) const {
             return std::visit([&originating, this]<typename T>(const T& o) -> std::coroutine_handle<> {
@@ -741,9 +773,8 @@ class FSM {
     >;
 
 public:
-    using State_t = State<StateId>;
-    using Event_t = Event<EventId>;
     using Transition_t = Transition<StateId, EventId>;
+    using CTransition_t = CTransition<StateId, EventId>;
 
     FSM() = default;
     FSM(std::string human_name) : m_name(std::move(human_name)) { }
@@ -890,13 +921,30 @@ public:
         return *this;
     }
 
-    auto GetTransitions() const {
-        return m_transition_table | std::views::transform([this](const auto& kv) {
+    auto GetTransitions() {
+        return m_transition_table | std::views::transform([this](auto& kv) {
             return Transition_t(*this, kv);
         });
     }
 
-    std::optional<Transition_t> GetTransition(const StateId& from, const EventId& event) const {
+    auto GetTransitions() const {
+        return m_transition_table | std::views::transform([this](const auto& kv) {
+            return CTransition_t(*this, kv);
+        });
+    }
+
+    std::optional<Transition_t> GetTransition(const StateId& from, const EventId& event) {
+        typename PartialTransition::Indirect key{&from, &event};
+        auto it = m_transition_table.find(key);
+
+        if (it != m_transition_table.end()) {
+            return Transition_t(*this, *it);
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    std::optional<CTransition_t> GetTransition(const StateId& from, const EventId& event) const {
         typename PartialTransition::Indirect key{&from, &event};
         auto it = m_transition_table.find(key);
 
@@ -1231,15 +1279,20 @@ public:
         std::forward<F>(event_initializer)(m_event_for_next_resume);
 
         // Treat this event as one that could change the state
-        const Transitioner& potential_transition = GetTransitioner(m_event_for_next_resume);
-        std::coroutine_handle<> state_to_resume = potential_transition.Perform(*this);
+        const Transitioner* potential_transition = GetTransitioner(m_event_for_next_resume);
+
+        // If transitioner is null, then a guard blocked it
+        if (potential_transition == nullptr)
+            return *this;
+
+        std::coroutine_handle<> state_to_resume = potential_transition->Perform(*this);
     
         // If an exception is thrown while the state is running, catch it to 
         // always cleanup
         try {
             state_to_resume.resume();
         } catch (...) {
-            potential_transition.ReportDone(*this, true);
+            potential_transition->ReportDone(*this, true);
             throw;
         }
 
@@ -1396,15 +1449,21 @@ private:
     template<typename>
     friend struct detail::StatePromiseType;
 
-    template<typename, typename>
+    template<typename, typename, bool>
     friend class Transition;
 
-    const Transitioner& GetTransitioner(const Event_t& event) const noexcept {
+    const Transitioner* GetTransitioner(const Event_t& event) const noexcept {
         typename PartialTransition::Indirect key{&m_cur_state->first, &event.GetId()};
-        if (auto it = m_transition_table.find(key); it != m_transition_table.end())
-            return it->second;
-        else
-            return null_transition; // No coded state transition, return null transition
+        if (auto it = m_transition_table.find(key); it != m_transition_table.end()) {
+            const auto& guard = it->second.Guard();
+
+            if (!guard || guard(event))
+                return &it->second;
+            else
+                return nullptr; // Guard rejected, return null transition
+        } else {
+            return &null_transition; // No coded state transition, return null transition
+        }
     }
     
     detail::StoredState<StateId>& EmplaceState(StateId id, StateHandle handle) {
@@ -1502,9 +1561,14 @@ private:
             return Result{std::noop_coroutine(), true};
         }
 
-        const Transitioner& transitioner = IsResetting()
-            ? *m_transition_after_reset
+        const Transitioner* transitioner = IsResetting()
+            ? m_transition_after_reset
             : GetTransitioner(pending_event);
+
+        // Transitioner is only ever null if a guard blocked it from firing
+        if (transitioner == nullptr) {
+            return Result{std::noop_coroutine(), true};
+        }
 
         if (!IsResetting()) {
             // Store the event into the FSM to be picked up by the transitioner
@@ -1517,7 +1581,7 @@ private:
         const auto cur_state = m_cur_state->second.Handle();
 
         Result res{};
-        res.next_state = transitioner.Perform(*this);
+        res.next_state = transitioner->Perform(*this);
         res.should_suspend = cur_state != res.next_state;
         return res;
     }
