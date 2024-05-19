@@ -777,7 +777,6 @@ public:
     using CTransition_t = CTransition<StateId, EventId>;
 
     FSM() = default;
-    FSM(std::string human_name) : m_name(std::move(human_name)) { }
 
     // Non-moveable, non-copyable
     // This is done because the awaiters and remote transitions hold FSM*.
@@ -786,12 +785,6 @@ public:
     FSM(FSM&&) = delete;
     FSM& operator=(const FSM&) = delete;
     FSM& operator=(FSM&&) = delete;
-
-    /// @brief Gets the human-readable name
-    std::string_view Name() const { return m_name; }
-
-    /// @brief Sets the human-readable name
-    FSM& Name(std::string name) { m_name = std::move(name); return *this;}
 
     /// @brief Gets the current state of the FSM, `nullptr` if there is no current state
     /// @details If the previous resumption of the state machine resulted in an abominable state
@@ -832,7 +825,7 @@ public:
         const StoredState_t* state = FindStoredState(id);
 
         if (state == nullptr)
-            throw std::runtime_error(std::format("Attempt to set nonexistent state on FSM '{}'", Name()));
+            throw std::runtime_error("Attempt to set nonexistent state on FSM");
         
         return SetCurrentState(State_t(*state));
     }
@@ -844,7 +837,7 @@ public:
     /// will trigger this transition.\n
     /// The combination of (from, event) forms a unique transition. If such a transition already exists,
     /// then its target \p to will be replaced.
-    FSM& AddTransition(StateId from, EventId event, StateId to) {
+    Transition_t AddTransition(StateId from, EventId event, StateId to) {
         auto to_handle = [&]() -> StateHandle {
             if (const StoredState_t* state = FindStoredState(to)) {
                 return state->second.Handle();
@@ -853,7 +846,7 @@ public:
             }
         }();
 
-        m_transition_table.emplace(
+        auto res = m_transition_table.emplace(
             PartialTransition{
                 .from = std::move(from),
                 .event = std::move(event)
@@ -861,7 +854,7 @@ public:
             LocalTransition{to_handle, to}
         );
 
-        return *this;
+        return Transition_t(*this, *res.first);
     }
 
     /// @brief Adds a transition that defines `from->to` whenever \p event is sent to this FSM, and the \p to state is located in another FSM.
@@ -875,7 +868,7 @@ public:
     /// @warning \p remote_fsm is not aware of such a remote transition existing. Therefore, this transition
     /// may become dangling if \p remote_fsm is moved or destroyed.
     template<typename DStateId, typename DEventId>
-    FSM& AddRemoteTransition(
+    Transition_t AddRemoteTransition(
         StateId from,
         EventId event,
         FSM<DStateId, DEventId>& remote_fsm,
@@ -886,7 +879,7 @@ public:
     }
 
     template<typename DStateId, typename DEventId>
-    FSM& AddRemoteTransition(
+    Transition_t AddRemoteTransition(
         StateId from_state,
         EventId from_event,
         FSM<DStateId, DEventId>& remote_fsm,
@@ -910,7 +903,7 @@ public:
             translated_event
         );
 
-        m_transition_table.emplace(
+        auto res = m_transition_table.emplace(
             PartialTransition{
                 .from = std::move(from_state),
                 .event = std::move(from_event)
@@ -918,7 +911,7 @@ public:
             RemoteTransition{std::move(target)}
         );
 
-        return *this;
+        return Transition_t(*this, *res.first);
     }
 
     auto GetTransitions() {
@@ -1611,7 +1604,6 @@ private:
         }
     }
 
-    std::string m_name{};
     const StoredState_t* m_cur_state{};
     
     // Transition table in format {from-state, event} -> to-state

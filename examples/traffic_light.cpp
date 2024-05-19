@@ -60,8 +60,8 @@ int main() {
     TrafficState(fsm, JaneGreen, "Jane Street");
     TrafficState(fsm, DoeGreen, "Doe Avenue");
     
-    fsm.AddTransition(JaneGreen, Toggle, DoeGreen)
-       .AddTransition(DoeGreen, Toggle, JaneGreen);
+    fsm.AddTransition(JaneGreen, Toggle, DoeGreen);
+    fsm.AddTransition(DoeGreen, Toggle, JaneGreen);
     
     fsm.SetCurrentState(JaneGreen);
     std::cout << "Starting out with Jane Street green\n";

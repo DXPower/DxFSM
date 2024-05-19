@@ -33,9 +33,7 @@ namespace {
 
         From() {
             // Intentionally add transition before states to test rebinding on AddState
-            fsm
-                .Name("FromFSM")
-                .AddTransition(FromStates::FM, FromEvents::FE, FromStates::FT);
+            fsm.AddTransition(FromStates::FM, FromEvents::FE, FromStates::FT);
 
             Main(fsm, FromStates::FM);
             Main(fsm, FromStates::FT);
@@ -72,12 +70,10 @@ namespace {
 
         To() {
             // Intentionally add transition before states to test rebinding on AddState
-            fsm
-                .Name("ToFSM")
-                .AddTransition(ToStates::TM, ToEvents::TE, ToStates::TT);
+            fsm.AddTransition(ToStates::TM, ToEvents::TE, ToStates::TT);
 
-                Main(fsm, ToStates::TM);
-                Main(fsm, ToStates::TT);
+            Main(fsm, ToStates::TM);
+            Main(fsm, ToStates::TT);
 
             fsm.SetCurrentState(ToStates::TM);
         }

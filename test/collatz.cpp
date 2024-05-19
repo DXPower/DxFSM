@@ -38,7 +38,7 @@ struct CollatzFsm {
     using State_t = State<StateId>;
     using FSM_t = FSM<StateId, EventId>;
 
-    FSM_t fsm{"CollatzFsm"};
+    FSM_t fsm;
     
     std::vector<int> sequence{};
     std::vector<EventId> event_ids{};
@@ -48,16 +48,15 @@ struct CollatzFsm {
         StateProcess(fsm, StateId::Processing);
         StateFinish(fsm, StateId::Finish);
 
-        fsm
-            .AddTransition(StateId::Start, EventId::ProcessValue, StateId::Processing)
-            .AddTransition(StateId::Processing, EventId::ProcessValue, StateId::Processing)
-            .AddTransition(StateId::Processing, EventId::Finish, StateId::Finish)
-            .AddTransition(StateId::Finish, EventId::Start, StateId::Start);
+        fsm.AddTransition(StateId::Start, EventId::ProcessValue, StateId::Processing);
+        fsm.AddTransition(StateId::Processing, EventId::ProcessValue, StateId::Processing);
+        fsm.AddTransition(StateId::Processing, EventId::Finish, StateId::Finish);
+        fsm.AddTransition(StateId::Finish, EventId::Start, StateId::Start);
 
         fsm.SetCurrentState(StateId::Start);
     }
 
-    State_t StateStart(FSM_t& fsm, StateId id) {
+    State_t StateStart(FSM_t& fsm, StateId) {
         // Specifically test using EmitAndReceive at beginning of loop
         Event_t event = co_await fsm.ReceiveInitialEvent();
 
@@ -75,7 +74,7 @@ struct CollatzFsm {
         }
     }
 
-    State_t StateProcess(FSM_t& fsm, StateId id) {
+    State_t StateProcess(FSM_t& fsm, StateId) {
         // Specifically test ReceiveEvent at top then EmitAndReceive at end of loop
         Event event = co_await fsm.ReceiveInitialEvent();
 
@@ -104,7 +103,7 @@ struct CollatzFsm {
         }
     }
 
-    State_t StateFinish(FSM_t& fsm, StateId id) {
+    State_t StateFinish(FSM_t& fsm, StateId) {
         Event_t event{};
 
         while (true) {

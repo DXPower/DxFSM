@@ -28,20 +28,18 @@ namespace {
         
         std::vector<int> light_sequence{};
 
-        Light(std::string name, StateId on_state, StateId off_state) {
-            fsm.Name(name);
-            
+        Light(StateId on_state, StateId off_state) {
             StateOn(fsm, on_state);
             StateOff(fsm, off_state);
 
-            fsm.AddTransition(on_state, EventId::CycleIn, off_state)
-               .AddTransition(off_state, EventId::CycleIn, on_state);
+            fsm.AddTransition(on_state, EventId::CycleIn, off_state);
+            fsm.AddTransition(off_state, EventId::CycleIn, on_state);
 
             // Start the FSM by bringing it into the off state
             fsm.SetCurrentState(on_state).InsertEvent(EventId::CycleIn);
         }
 
-        State StateOn(FSM& fsm, StateId id) {
+        State StateOn(FSM& fsm, StateId) {
             Event event = co_await fsm.ReceiveInitialEvent();
 
             while (true) {
@@ -62,7 +60,7 @@ namespace {
             }
         }
 
-        State StateOff(FSM& fsm, StateId id) {
+        State StateOff(FSM& fsm, StateId) {
             while (true) {
                 co_await fsm.IgnoreEvent();
                 light_on = false;
@@ -75,7 +73,7 @@ namespace {
 TEST_CASE("Light Local Test") {
     using Light_t = Light<true, 0>;
 
-    Light_t light("LightFSM", "StateOn", "StateOff");
+    Light_t light("StateOn", "StateOff");
     light.current_brightness = 37;
 
     using EventId = Light_t::EventId;
@@ -93,9 +91,9 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
     using Green = Light<false, 1>;
     using Blue = Light<false, 2>;
 
-    Red red("RedFSM", "RedOn", "RedOff");
-    Green green("GreenFSM", "GreenOn", "GreenOff");
-    Blue blue("BlueFSM", "BlueOn", "BlueOff");
+    Red red("RedOn", "RedOff");
+    Green green("GreenOn", "GreenOff");
+    Blue blue("BlueOn", "BlueOff");
     red.current_brightness = 64;
     green.current_brightness = 28;
     blue.current_brightness = 36;

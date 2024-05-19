@@ -50,7 +50,7 @@ namespace {
     };
 
     struct Resets {
-        FSM_t fsm{"ResetsFSM"};
+        FSM_t fsm;
 
         std::vector<Stage> stages{};
         bool throw_on_reset{};
@@ -61,10 +61,9 @@ namespace {
             Cycler(fsm, "Two");
             Cycler(fsm, "Three");
 
-            fsm
-                .AddTransition("One", EventId::OuterStep, "Two")
-                .AddTransition("Two", EventId::OuterStep, "Three")
-                .AddTransition("Three", EventId::OuterStep, "One");
+            fsm.AddTransition("One", EventId::OuterStep, "Two");
+            fsm.AddTransition("Two", EventId::OuterStep, "Three");
+            fsm.AddTransition("Three", EventId::OuterStep, "One");
 
             fsm.SetCurrentState("One").InsertEvent(EventId::InnerStep, 1);
         }
@@ -357,11 +356,10 @@ namespace {
             StateFunc(fsm, "One");
             StateFunc(fsm, "Two");
 
-            fsm
-                .AddTransition("One", EventId::InnerStep, "One")
-                .AddTransition("Two", EventId::InnerStep, "Two")
-                .AddTransition("One", EventId::Jump, "Two")
-                .AddTransition("Two", EventId::Jump, "One");
+            fsm.AddTransition("One", EventId::InnerStep, "One");
+            fsm.AddTransition("Two", EventId::InnerStep, "Two");
+            fsm.AddTransition("One", EventId::Jump, "Two");
+            fsm.AddTransition("Two", EventId::Jump, "One");
 
             fsm.SetCurrentState("One");
         }
