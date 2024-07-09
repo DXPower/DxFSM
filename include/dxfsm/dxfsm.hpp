@@ -177,7 +177,7 @@ public:
         _any_ptr.Reset();
         this->Reserve(sizeof(T));
 
-        using Stored_t = std::remove_reference_t<T>;
+        using Stored_t = std::remove_cvref_t<T>;
         Stored_t* ptr = std::construct_at(reinterpret_cast<Stored_t*>(_storage), std::forward<T>(data));
 
         this->_any_ptr = ptr;
