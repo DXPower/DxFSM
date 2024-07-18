@@ -40,9 +40,12 @@ namespace {
         }
 
         State StateOn(FSM& fsm, StateId) {
+            CheckActive(fsm, true);
+
             Event event = co_await fsm.ReceiveInitialEvent();
 
             while (true) {
+                CheckActive(fsm, true);
                 light_on = true;
 
                 if (event == EventId::CycleOut) {
@@ -62,6 +65,7 @@ namespace {
 
         State StateOff(FSM& fsm, StateId) {
             while (true) {
+                CheckActive(fsm, true);
                 co_await fsm.IgnoreEvent();
                 light_on = false;
                 light_sequence.push_back(0);
@@ -103,6 +107,10 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
     red.fsm.AddRemoteTransition("RedOn"sv, EventId::CycleOut, green.fsm, "GreenOn"sv);
     green.fsm.AddRemoteTransition("GreenOn"sv, EventId::CycleOut, blue.fsm, "BlueOn"sv);
     blue.fsm.AddRemoteTransition("BlueOn"sv, EventId::CycleOut, red.fsm, "RedOn"sv);
+
+    CheckActive(red.fsm, false);
+    CheckActive(green.fsm, false);
+    CheckActive(blue.fsm, false);
 
     SECTION("Normal Operation") {
         CHECK(red.fsm.GetCurrentState()->Id() == "RedOff");
@@ -179,4 +187,8 @@ TEST_CASE("Remote Transitions with External Event IDs (No ID conversion)", "[rem
         REQUIRE(blue.fsm.GetCurrentState().has_value());
         CHECK(blue.fsm.GetCurrentState()->Id() == "BlueOff");
     }
+    
+    CheckActive(red.fsm, false);
+    CheckActive(green.fsm, false);
+    CheckActive(blue.fsm, false);
 }

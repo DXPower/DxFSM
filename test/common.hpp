@@ -12,3 +12,11 @@ auto GetAbominableStates(const dxfsm::FSM<StateId, EventId>& fsm) {
 
     return states;
 }
+
+template<typename StateId, typename EventId>
+void CheckActive(const dxfsm::FSM<StateId, EventId>& fsm, bool expectation) {
+    if (expectation && !fsm.IsActive())
+        throw std::runtime_error("Expected the FSM to be active");
+    else if (!expectation && fsm.IsActive())
+        throw std::runtime_error("Expected the FSM to be idle");
+}

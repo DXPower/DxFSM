@@ -23,6 +23,7 @@ namespace {
             co_await fsm.EmitAndReceive(e);
         }
     }
+    
     FSM::State_t FromResets(FSM& fsm, StateId) {
         auto e = co_await fsm.ReceiveInitialEvent();
 
@@ -56,8 +57,8 @@ namespace {
         auto to = To(*fsm, "To");
 
         fsm->AddTransition(from.Id(), "Pass", to.Id());
-        fsm->AddTransition(from.Id(), "Reject", to.Id());
-        fsm->GetTransition(from.Id(), "Reject")->Guard([](const FSM::Event_t& e) {
+        fsm->AddTransition(from.Id(), "Reject", to.Id())
+            .Guard([](const FSM::Event_t& e) {
             return e.GetId() != "Reject";
         });
 

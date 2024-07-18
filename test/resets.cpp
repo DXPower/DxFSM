@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_vector.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 using namespace dxfsm;
 using namespace std::string_view_literals;
@@ -56,10 +57,10 @@ namespace {
         bool throw_on_reset{};
         bool throw_after_jump{};
 
-        Resets() {
-            Cycler(fsm, "One");
-            Cycler(fsm, "Two");
-            Cycler(fsm, "Three");
+        Resets(bool emit_first) {
+            Cycler(fsm, "One", emit_first);
+            Cycler(fsm, "Two", emit_first);
+            Cycler(fsm, "Three", emit_first);
 
             fsm.AddTransition("One", EventId::OuterStep, "Two");
             fsm.AddTransition("Two", EventId::OuterStep, "Three");
@@ -68,13 +69,21 @@ namespace {
             fsm.SetCurrentState("One").InsertEvent(EventId::InnerStep, 1);
         }
 
-        State_t Cycler(FSM_t& fsm, StateId state_id) {
-            Event_t event = co_await fsm.ReceiveInitialEvent();
-            ResetToken reset_token{};
+        State_t Cycler(FSM_t& fsm, StateId state_id, bool emit_first) {
+            // Intentionally testing EmitAndReceiveResettable at beginning here
+            Event_t event{};
+            ResetToken reset_token;
+            
+            if (emit_first)
+                reset_token = co_await fsm.EmitAndReceiveResettable(event);
+            else
+                event = co_await fsm.ReceiveInitialEvent();
+
 
             while (true) {
             Escape:
                 for (StageId stage_id : {StageId::A, StageId::B, StageId::C, StageId::D}) {
+                    CheckActive(fsm, true);
                     if (reset_token) {
                         if (throw_on_reset)
                             throw std::runtime_error("Exception during reset");
@@ -118,7 +127,7 @@ namespace {
 TEST_CASE("Resettable States", "[advanced][resets][exceptions]") {
     using enum StageId;
 
-    Resets resets{};
+    Resets resets{GENERATE(true, false)};
     int counter = 2;
 
     CHECK(resets.CurrentStage() == Stage{"One", A, 1});
@@ -167,14 +176,16 @@ TEST_CASE("Resettable States", "[advanced][resets][exceptions]") {
     REQUIRE(failed_states.size() == 1);
     CHECK(failed_states[0].IsAbominable());
     CHECK(failed_states[0].Id() == "One");
+
+    CheckActive(resets.fsm, false);
 }
 
 TEST_CASE("Resettable States with Remote Transitions", "[advanced][resets][remote][exceptions]") {
     using enum StageId;
 
-    Resets ra{};
-    Resets rb{};
-    Resets rc{};
+    Resets ra{GENERATE(true, false)};
+    Resets rb{GENERATE(true, false)};
+    Resets rc{GENERATE(true, false)};
 
     for (std::string_view state : {"One", "Two", "Three"}) {
         ra.fsm.AddRemoteTransition(state, EventId::Jump, rb.fsm, "One"sv);
@@ -212,12 +223,16 @@ TEST_CASE("Resettable States with Remote Transitions", "[advanced][resets][remot
     REQUIRE(failed_states.size() == 1);
     CHECK(failed_states[0].IsAbominable());
     CHECK(failed_states[0].Id() == "One");
+    
+    CheckActive(ra.fsm, false);
+    CheckActive(rb.fsm, false);
+    CheckActive(rc.fsm, false);
 }
 
 TEST_CASE("Resettable States Resend Event", "[advanced][resets][exceptions]") {
     using enum StageId;
 
-    Resets resets{};
+    Resets resets{GENERATE(true, false)};
     int counter = 2;
 
     resets.throw_on_reset = true;
@@ -241,13 +256,15 @@ TEST_CASE("Resettable States Resend Event", "[advanced][resets][exceptions]") {
         Stage{"One", B, 2},
         Stage{"Two", A, 3}
     }));
+
+    CheckActive(resets.fsm, false);
 }
 
 TEST_CASE("Resettable States Remote Transitions Do Not Reset Local", "[advanced][resets]") {
     using enum StageId;
 
-    Resets ra{};
-    Resets rb{};
+    Resets ra{GENERATE(true, false)};
+    Resets rb{GENERATE(true, false)};
 
     ra.fsm.AddRemoteTransition("One"sv, EventId::Jump, rb.fsm, "Three"sv);
 
@@ -316,6 +333,9 @@ TEST_CASE("Resettable States Remote Transitions Do Not Reset Local", "[advanced]
             Stage{"Three", A, 3},
         }));
     }
+
+    CheckActive(ra.fsm, false);
+    CheckActive(rb.fsm, false);
 }
 
 namespace {
@@ -368,6 +388,7 @@ namespace {
             Event_t event{};
 
             while (true) {
+                CheckActive(fsm, true);
                 auto should_reset = co_await fsm.ReceiveEventResettable(event);
 
                 if (!should_reset) {
@@ -442,4 +463,6 @@ TEST_CASE("Other Resettable Awaitables", "[advanced][resets][rebinding][removing
         Action{"Two", ActionType::Received, 8},
 
     }));
+
+    CheckActive(resets.fsm, false);
 }

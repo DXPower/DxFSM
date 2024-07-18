@@ -10,6 +10,7 @@ namespace {
 
     using FSM_t = dxfsm::FSM<StateId, EventId>;
     using State_t = FSM_t::State_t;
+    using Event_t = FSM_t::Event_t;
 
     State_t Main(FSM_t& fsm, StateId id, bool& throw_on_resume, bool& delete_on_resume, std::string_view& state_to_set) {
         while (true) {
@@ -37,6 +38,25 @@ namespace {
             } else {
                 (void) co_await fsm.EmitAndReceiveResettable(event);
             }
+        }
+    }
+
+    State_t EmitFirst(FSM_t& fsm, StateId, bool use_resettable) {
+        Event_t event("Blah");
+
+        if (use_resettable)
+            (void) co_await fsm.EmitAndReceiveResettable(event);
+        else
+            co_await fsm.EmitAndReceive(event);
+    }
+
+    State_t InsertWhileRunning(FSM_t& fsm, StateId, bool before) {
+        if (before)
+            co_await fsm.IgnoreEvent();
+
+        while (true) {
+            fsm.InsertEvent("Blech");
+            (void) co_await fsm.IgnoreEventResettable();
         }
     }
 }
@@ -94,5 +114,19 @@ TEST_CASE("Basic usage error checking", "[basic][exceptions][removing]") {
         SECTION("Reset from SetCurrentState") {
             CHECK_THROWS_WITH(fsm.SetCurrentState("State"), ContainsSubstring("non-empty event"));
         }
+    }
+
+    SECTION("Cannot emit an event before receiving one") {
+        auto state = EmitFirst(fsm, "EmitFirst", GENERATE(true, false));
+        fsm.SetCurrentState(state);
+
+        CHECK_THROWS_WITH(fsm.InsertEvent("Bleh"), ContainsSubstring("before receiving"));
+    }
+
+    SECTION("Cannot insert an event while running") {
+        auto state = InsertWhileRunning(fsm, "InsertWhileRunning", GENERATE(true, false));
+        fsm.SetCurrentState(state);
+
+        CHECK_THROWS_WITH(fsm.InsertEvent("Begin"), ContainsSubstring("FSM is running"));
     }
 }

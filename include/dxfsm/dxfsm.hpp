@@ -406,6 +406,18 @@ namespace detail {
     template<typename StateId>
     class StateCoro;
 
+    // This awaiter lets the FSM be marked as active on the very
+    // first event it receives.
+    struct InitialStateAwaitable {
+        bool* fsm_active{};
+
+        constexpr bool await_ready() const { return false; }
+        constexpr void await_suspend(std::coroutine_handle<>) const { }
+        void await_resume() {
+            *fsm_active = true;
+        }
+    };
+
     template<typename StateId>
     struct StatePromiseType {
         using handle_type = std::coroutine_handle<StatePromiseType>;
@@ -413,6 +425,7 @@ namespace detail {
 
         // This type is the same as StoredState below
         std::pair<const StateId, StateCoro<StateId>>* self{};
+        bool* fsm_active{};
 
         StatePromiseType() = delete; // State must take FSM& and Id parameters
 
@@ -420,13 +433,14 @@ namespace detail {
         template<typename EventId, typename... Args> 
         StatePromiseType(FSM<StateId, EventId>& fsm, StateId id, Args&&...) {
             self = &fsm.EmplaceState(std::move(id), handle_type::from_promise(*this));
+            fsm_active = &fsm.m_is_fsm_active;
         }
 
         template<typename Self, typename EventId, typename... Args> 
         StatePromiseType(Self&&, FSM<StateId, EventId>& fsm, StateId id, Args&&...) 
             : StatePromiseType(fsm, id) { }
 
-        constexpr std::suspend_always initial_suspend() noexcept { return {}; }
+        constexpr InitialStateAwaitable initial_suspend() noexcept { return {fsm_active}; }
         constexpr std::suspend_always final_suspend() noexcept { return {}; }
 
         State<StateId> get_return_object() noexcept {
@@ -978,6 +992,7 @@ public:
     struct EmitReceiveAwaitable {
         FSM* self{};
         Event_t* event_source{};
+        Event_t* event_dest{}; // This is usually the same as event_source
         std::coroutine_handle<> next_state{};
 
         bool await_ready() {
@@ -996,7 +1011,8 @@ public:
 
         void await_resume() {
             self->m_is_fsm_active = true;
-            *event_source = std::move(self->m_event_for_next_resume);
+            *event_dest = std::move(self->m_event_for_next_resume);
+            self->m_event_for_next_resume.Clear();
         }
     };
 
@@ -1012,11 +1028,19 @@ public:
             throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
         }
 
+        if (!event.Empty() && !m_event_for_next_resume.Empty()) {
+            throw std::runtime_error("Cannot send an event before receiving any events");
+        }
+
         if (event.Empty()) {
             TakeLargestEventStorage(std::move(event));
         }
 
-        return EmitReceiveAwaitable{this, &event};
+        // Handle the case for when we use EmitAndReceive before receiving an event
+        if (m_event_for_next_resume.Empty()) [[likely]]
+            return EmitReceiveAwaitable{this, &event, &event};
+        else [[unlikely]]
+            return EmitReceiveAwaitable{this, &m_event_for_next_resume, &event};
     }
 
     /// @brief Awaitable type used by @link FSM::EmitAndReceiveResettable @endlink
@@ -1025,6 +1049,7 @@ public:
     struct EmitReceiveResettableAwaitable {
         FSM* self{};
         Event_t* event_source{};
+        Event_t* event_dest{}; // Usually the same as event_source
         std::coroutine_handle<> next_state{};
 
         bool await_ready() {
@@ -1040,7 +1065,7 @@ public:
                 next_state = res.next_state;
                 return false;
             } else {
-                // Clear the fact that this state may be reset if 
+                // Clear the fact that this state may be reset if we don't suspend
                 self->m_state_to_reset = nullptr;
                 return true;
             }
@@ -1056,9 +1081,10 @@ public:
             auto reset_token = self->CommonResettableAwaitResume();
 
             if (reset_token.ShouldReset()) {
-                event_source->Clear();
+                event_dest->Clear();
             } else {
-                *event_source = std::move(self->m_event_for_next_resume);
+                *event_dest = std::move(self->m_event_for_next_resume);
+                self->m_event_for_next_resume.Clear();
             }
 
             return reset_token;
@@ -1081,7 +1107,15 @@ public:
             throw std::runtime_error("Cannot send non-empty event from state that is resetting.");
         }
 
-        return EmitReceiveResettableAwaitable{this, &event};
+        if (!event.Empty() && !m_event_for_next_resume.Empty()) {
+            throw std::runtime_error("Cannot send an event before receiving any events");
+        }
+
+        if (m_event_for_next_resume.Empty()) [[likely]] {
+            return EmitReceiveResettableAwaitable{this, &event, &event};
+        } else {
+            return EmitReceiveResettableAwaitable{this, &m_event_for_next_resume, &event};
+        }
     }
     
 
@@ -1103,6 +1137,7 @@ public:
         void await_resume() {
             self->m_is_fsm_active = true;
             *event_return = std::move(self->m_event_for_next_resume);
+            self->m_event_for_next_resume.Clear();
         }
     };
 
@@ -1145,6 +1180,7 @@ public:
                 event_return->Clear();
             } else {
                 *event_return = std::move(self->m_event_for_next_resume);
+                self->m_event_for_next_resume.Clear();
             }
 
             return reset_token;
@@ -1183,7 +1219,9 @@ public:
 
         [[nodiscard]] Event_t await_resume() {
             self->m_is_fsm_active = true;
-            return std::move(self->m_event_for_next_resume);
+            Event_t ret = std::move(self->m_event_for_next_resume);
+            self->m_event_for_next_resume.Clear();
+            return ret;
         }
     };
 
@@ -1269,6 +1307,10 @@ public:
     /// it is resumed, otherwise it results in undefined behavior.
     template<std::invocable<Event_t&> F>
     FSM& InsertEvent(F&& event_initializer) {
+        if (m_is_fsm_active) [[unlikely]] {
+            throw std::runtime_error("Cannot insert event while the FSM is running");
+        }
+
         std::forward<F>(event_initializer)(m_event_for_next_resume);
 
         // Treat this event as one that could change the state
@@ -1544,8 +1586,10 @@ private:
         };
 
         // If this state sends an empty event and we're not resetting,
-        // then suspend the FSM
-        if (pending_event.Empty() && not IsResetting()) {
+        // then suspend the FSM.
+        // Also check if the FSM has consumed the prior event, which is only
+        // false if EmitAndReceive() or the resettable version is called first.
+        if (pending_event.Empty() && m_event_for_next_resume.Empty() && not IsResetting()) {
             return Result{std::noop_coroutine(), true};
         }
 
@@ -1554,9 +1598,18 @@ private:
             return Result{std::noop_coroutine(), true};
         }
 
-        const Transitioner* transitioner = IsResetting()
-            ? m_transition_after_reset
-            : GetTransitioner(pending_event);
+        const Transitioner* const transitioner = [&] {
+            if (IsResetting()) {
+                return m_transition_after_reset;
+            } else if (!m_event_for_next_resume.Empty()) [[unlikely]] {
+                // If there is a pending event, receive it without emitting
+                // This will only happen if emitting an empty event is the first
+                // thing a coroutine does (no receive first).
+                return &null_transition;
+            } else {
+                return GetTransitioner(pending_event);
+            }
+        }();
 
         // Transitioner is only ever null if a guard blocked it from firing
         if (transitioner == nullptr) {
@@ -1596,7 +1649,7 @@ private:
     // then the stored event capacity,
     // but only if the stored event is empty.
     void TakeLargestEventStorage(Event_t&& in) {
-        if (m_event_for_next_resume.Empty())
+        if (!m_event_for_next_resume.Empty())
             return;
 
         if (in.Capacity() > m_event_for_next_resume.Capacity()) {
