@@ -39,7 +39,7 @@ coroutine MyState() {
 }
 ```
 
-An *await* statement will pause the coroutine until the WaitForNextEvent() *awaiter* returns a result.
+An *await* statement will pause the coroutine until the GetNextEvent() *awaiter* returns a result.
 Once ready, the MyState coroutine will resume with an Event object returned into the `ev` variable.
 
 For example, walking through MyState's execution (the numbering will make sense shortly):
