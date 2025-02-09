@@ -1072,7 +1072,10 @@ public:
         }
 
         std::coroutine_handle<> await_suspend(StateHandle from_state) {
-            self->m_state_to_reset = from_state;
+            if (!next_state) {
+                self->m_state_to_reset = from_state;
+            }
+
             self->m_is_fsm_active = false;
             return next_state;          
         }
