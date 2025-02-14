@@ -652,7 +652,14 @@ private:
                             originating.m_state_to_reset = nullptr;
                         }
 
+                        State_t original_state(*originating.m_cur_state);
                         originating.m_cur_state = StateHandle::from_address(local.state_to_resume.address()).promise().self;
+                        
+                        if (originating.m_transition_observer) {
+                            assert(!originating.m_event_for_next_resume.Empty());
+                            originating.m_transition_observer(originating, original_state, State_t(*originating.m_cur_state), originating.m_event_for_next_resume);
+                        }
+                        
                         return local.state_to_resume;
                     }
                 } else if constexpr (std::is_same_v<T, RemoteTransition>) {
@@ -828,6 +835,13 @@ public:
             m_state_to_reset = nullptr; // Clear if this was set
         }
 
+        if (m_transition_observer) {
+            auto cur_state = GetCurrentState();
+            if (!cur_state.has_value() || cur_state->m_state != stored_state) {
+                m_transition_observer(*this, cur_state, State_t(*stored_state), Event_t());
+            }
+        }
+
         m_cur_state = stored_state;
         return *this;
     }
@@ -842,6 +856,11 @@ public:
             throw std::runtime_error("Attempt to set nonexistent state on FSM");
         
         return SetCurrentState(State_t(*state));
+    }
+
+    FSM& SetTransitionObserver(std::function<void(const FSM&, std::optional<State_t>, State_t, const Event_t&)> observer) {
+        m_transition_observer = std::move(observer);
+        return *this;
     }
 
     /// @brief Adds a transition that defines `from->to` whenever \p event is sent to this FSM.
@@ -1676,6 +1695,8 @@ private:
 
     // Temporary event storage to be captured by Awaitable on resume
     Event_t m_event_for_next_resume{};
+
+    std::function<void(const FSM&, std::optional<State_t>, State_t, const Event_t&)> m_transition_observer;
 
     // Shared null_transition instance
     inline static const Transitioner null_transition{NullTransition{}};
