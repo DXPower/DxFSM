@@ -644,6 +644,8 @@ private:
                     if (!originating.IsResetting() && originating.ShouldSendResetOnTransition() && different_states) {
                         originating.m_transition_after_reset = this;
                         originating.m_cur_state = originating.m_state_to_reset.promise().self;
+                        // When resetting, the previous state is always the formerly current state
+                        originating.m_prev_state = originating.m_cur_state;
                         return originating.m_state_to_reset;
                     } else {
                         // If we get here while resetting, that means the reset is done and can be cleared
@@ -651,6 +653,9 @@ private:
                             originating.m_transition_after_reset = nullptr;
                             originating.m_state_to_reset = nullptr;
                         }
+
+                        // A regular transition should store the prior current state as previous
+                        originating.m_prev_state = originating.m_cur_state;
 
                         State_t original_state(*originating.m_cur_state);
                         originating.m_cur_state = StateHandle::from_address(local.state_to_resume.address()).promise().self;
@@ -666,6 +671,8 @@ private:
                     const detail::RemoteTransitionTargetBase& remote = *o.remote_target;
                     return remote.TransitionOnRemote(&originating);
                 } else if constexpr(std::is_same_v<T, NullTransition>) {
+                    // In a null transition, the previous state is always the current state
+                    originating.m_prev_state = originating.m_cur_state;
                     return originating.m_cur_state->second.Handle();
                 }
             }, m_data);
@@ -818,6 +825,13 @@ public:
             return std::nullopt;
     }
 
+    auto GetPreviousState() const -> std::optional<State_t> {
+        if (m_prev_state != nullptr)
+            return State_t(*m_prev_state);
+        else
+            return std::nullopt;
+    }
+
     FSM& SetCurrentState(State_t state) {
         if (state.IsAbominable())
             throw std::runtime_error("Attempt to set abominable state as current on FSM");
@@ -842,6 +856,7 @@ public:
             }
         }
 
+        m_prev_state = m_cur_state;
         m_cur_state = stored_state;
         return *this;
     }
@@ -1415,6 +1430,10 @@ public:
             m_cur_state = nullptr;
         }
 
+        if (&*erase_it = m_prev_state) {
+            m_prev_state = nullptr;
+        }
+
         m_states.erase(erase_it);
         RebindLocalTransitions();
         return true;
@@ -1680,6 +1699,7 @@ private:
     }
 
     const StoredState_t* m_cur_state{};
+    const StoredState_t* m_prev_state{};
     
     // Transition table in format {from-state, event} -> to-state
     // That is, an event sent from from-state will be routed to to-state.
@@ -1743,6 +1763,7 @@ namespace detail {
                 target_fsm->m_transition_after_reset = &local_transitioner;
 
                 target_fsm->m_cur_state = target_fsm->m_state_to_reset.promise().self;
+                target_fsm->m_prev_state = target_fsm->m_cur_state;
                 return target_fsm->m_state_to_reset;
             } else {
                 return local_transitioner.Perform(*target_fsm);
